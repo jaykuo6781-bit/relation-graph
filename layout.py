@@ -7,10 +7,10 @@
 手机拿到的是一份已经排好版的静态坐标,只负责画。手机端没有任何
 物理循环,平移缩放走 CSS transform 由 GPU 合成,CPU 基本闲置。
 
-两个让重算尽量少发生的设计:
-  - 结果按 graph_version 缓存,数据不变就不重算
-  - 重算时以上一次的坐标为起点,只跑少量迭代,所以布局不会每次
-    大变样(用户对图的空间记忆能保留),也快得多
+除了坐标,服务端还把**画一条弧线所需的全部参数**都算好了(贝塞尔控制点、
+标签落点、类别标记符),手机端连一次三角函数都不用做。
+
+布局按圈子分别计算与缓存 —— 切圈子只是换一份已经算好的坐标。
 """
 
 import json
@@ -27,11 +27,17 @@ HEIGHT = 1000.0
 FULL_ITERATIONS = 300      # 冷启动(没有历史坐标)
 WARM_ITERATIONS = 80       # 增量(有历史坐标,只需微调)
 
-SEED_KEY = "layout_seed_positions"
+# 弧线弯曲程度:控制点偏离弦中点的距离占弦长的比例。
+# 这一点点弧度是"知识图谱观感"和"流程示意图观感"的分界线。
+CURVE = 0.14
 
 
-def _load_seed():
-    raw = db.get_meta(SEED_KEY)
+def _seed_key(circle_id):
+    return f"layout_seed_{circle_id or 'all'}"
+
+
+def _load_seed(circle_id):
+    raw = db.get_meta(_seed_key(circle_id))
     if not raw:
         return {}
     try:
@@ -40,14 +46,14 @@ def _load_seed():
         return {}
 
 
-def _save_seed(pos):
+def _save_seed(circle_id, pos):
     db.connect()
     with db.tx():
-        db.set_meta(SEED_KEY, json.dumps(
+        db.set_meta(_seed_key(circle_id), json.dumps(
             {str(k): [round(v[0], 2), round(v[1], 2)] for k, v in pos.items()}))
 
 
-def compute(nodes, pos_adj, neg_adj, factions):
+def compute(nodes, pos_adj, neg_adj, factions, circle_id=None):
     """Fruchterman-Reingold 变体。
 
     在标准算法基础上加了两条针对"人际关系图"的规则:
@@ -60,7 +66,7 @@ def compute(nodes, pos_adj, neg_adj, factions):
     if n == 1:
         return {nodes[0]: (WIDTH / 2, HEIGHT / 2)}
 
-    seed = _load_seed()
+    seed = _load_seed(circle_id)
     # 固定随机种子:同一份数据每次算出来的图是一样的,不会随机跳动
     rng = random.Random(20260101)
 
@@ -159,45 +165,90 @@ def compute(nodes, pos_adj, neg_adj, factions):
     return {v: (pos[v][0], pos[v][1]) for v in nodes}
 
 
-def get_graph_payload():
-    """图谱视图要的全部数据 —— 坐标、颜色、粗细都已算好。
+def _arc(x1, y1, x2, y2):
+    """算出一条弧线的控制点,以及曲线中点(标签和标记符落在这里)。
+
+    弯曲方向由端点坐标唯一决定,所以同一条边每次渲染都朝同一边弯,
+    不会闪来闪去。
+    """
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy) or 1.0
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    # 垂直于弦的单位向量
+    px, py = -dy / length, dx / length
+    off = CURVE * length
+    cx, cy = mx + px * off, my + py * off
+    # 二次贝塞尔在 t=0.5 处的点
+    qx = 0.25 * x1 + 0.5 * cx + 0.25 * x2
+    qy = 0.25 * y1 + 0.5 * cy + 0.25 * y2
+    return cx, cy, qx, qy
+
+
+def _edge_display(kinds, w):
+    """决定一条边怎么显示:标签取最强的那个关系,标记符取它的类别。"""
+    if not kinds:
+        return {"label": "", "cat": "社交", "glyph": "", "count": 0}
+    dominant = max(kinds, key=lambda k: abs(k.get("strength", 0)))
+    cat = dominant.get("cat", "社交")
+    return {
+        "label": dominant["kind"],
+        "cat": cat,
+        "glyph": db.CATEGORY_GLYPH.get(cat, ""),
+        "count": len(kinds),
+        "all_kinds": [k["kind"] for k in kinds],
+    }
+
+
+def get_graph_payload(circle_id=None):
+    """图谱视图要的全部数据 —— 坐标、弧线、颜色、粗细都已算好。
 
     手机端拿到后直接画,不做任何计算。
     """
-    cached = db.cache_get("graph_payload")
+    cache_key = f"graph_payload_{circle_id or 'all'}"
+    cached = db.cache_get(cache_key)
     if cached is not None:
         return cached
 
-    g = analysis.build_graph()
+    g = analysis.build_graph(circle_id)
     people = g["people"]
     nodes_ids = sorted(people.keys())
 
-    fac = analysis.detect_factions()
+    fac = analysis.detect_factions(circle_id)
     faction_of = {int(k): v for k, v in fac["assignment"].items()}
 
     # 中介中心性决定节点大小 —— 一眼看出谁是绕不开的
     bt = analysis._brandes(nodes_ids, g["pos_adj"]) if nodes_ids else {}
     mx_bt = max(bt.values()) if bt else 0
 
-    pos = compute(nodes_ids, g["pos_adj"], g["neg_adj"], faction_of)
+    pos = compute(nodes_ids, g["pos_adj"], g["neg_adj"], faction_of, circle_id)
     if pos:
-        _save_seed(pos)
+        _save_seed(circle_id, pos)
+
+    # 圈子大小排名 —— 前 3 大的圈子拿到分类色,其余归中性灰
+    fsize = defaultdict(int)
+    for pid in nodes_ids:
+        fsize[faction_of.get(pid, 0)] += 1
+    frank = {fid: i for i, (fid, _) in enumerate(
+        sorted(fsize.items(), key=lambda kv: (-kv[1], kv[0])))}
 
     nodes = []
     for pid in nodes_ids:
         p = people[pid]
         x, y = pos.get(pid, (WIDTH / 2, HEIGHT / 2))
         importance = (bt.get(pid, 0) / mx_bt) if mx_bt else 0.0
+        name = p["name"]
         nodes.append({
             "id": pid,
-            "name": p["name"],
+            "name": name,
+            "initial": name[0] if name else "?",
             "dept": p.get("dept", ""),
             "title": p.get("title", ""),
             "is_me": bool(p.get("is_me", 0)),
             "x": round(x, 1),
             "y": round(y, 1),
             "faction": faction_of.get(pid, 0),
-            "r": round(8 + 14 * importance, 1),
+            "frank": frank.get(faction_of.get(pid, 0), 99),
+            "r": round(13 + 13 * importance, 1),
             "friends": len(g["pos_adj"].get(pid, {})),
             "enemies": len(g["neg_adj"].get(pid, {})),
         })
@@ -206,21 +257,28 @@ def get_graph_payload():
     for (a, b), w in g["pair_w"].items():
         if w == 0 or a not in pos or b not in pos:
             continue
-        kinds = [k["kind"] for k in g["pair_kinds"].get((a, b), [])]
+        x1, y1 = pos[a]
+        x2, y2 = pos[b]
+        cx, cy, qx, qy = _arc(x1, y1, x2, y2)
+        disp = _edge_display(g["pair_kinds"].get((a, b), []), w)
         edges.append({
             "a": a, "b": b,
-            "x1": round(pos[a][0], 1), "y1": round(pos[a][1], 1),
-            "x2": round(pos[b][0], 1), "y2": round(pos[b][1], 1),
+            "x1": round(x1, 1), "y1": round(y1, 1),
+            "x2": round(x2, 1), "y2": round(y2, 1),
+            "cx": round(cx, 1), "cy": round(cy, 1),   # 贝塞尔控制点
+            "mx": round(qx, 1), "my": round(qy, 1),   # 曲线中点(放标记符/标签)
             "w": w,
-            "width": round(1 + 1.2 * abs(w), 1),
-            "kinds": kinds,
+            "width": round(1.2 + 1.3 * abs(w), 1),
+            **disp,
         })
 
+    circle = db.get_circle(circle_id) if circle_id else None
     payload = {
+        "circle": circle,
         "width": WIDTH, "height": HEIGHT,
         "nodes": nodes, "edges": edges,
         "faction_count": len(fac["factions"]),
         "version": db.graph_version(),
     }
-    db.cache_put("graph_payload", payload)
+    db.cache_put(cache_key, payload)
     return payload

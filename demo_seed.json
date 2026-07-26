@@ -1,18 +1,22 @@
 {
-  "_comment": "演示数据:虚构的「云帆科技」,19 人。全部人名均为虚构,与任何真实人物无关。这份数据同时是四大算法的测试基准 —— 期望结果见 _expected 字段。",
-  "version": 1,
+  "_comment": "演示数据:两个圈子。全部人名均为虚构,与任何真实人物无关。这份数据同时是算法的测试基准 —— 期望结果见 _expected 字段。",
+  "version": 2,
   "me": "苏明哲",
   "_expected": {
-    "factions": "应聚出 3 个圈子:技术派(陈国栋为核心)、市场派(周文彬为核心)、财务行政派(许宏伟为核心)",
-    "straddler": "林子豪应被标为骑墙者 —— 他同时跟陈国栋和周文彬交好",
-    "intro_path": "苏明哲 → 周文彬 的引荐路径应为:苏明哲 → 林子豪 → 周文彬",
-    "top_ally_vs_zhou": "以周文彬为目标时,可结盟名单第一名应是陈国栋",
-    "unstable_triangles": [
-      "苏明哲+李明远(+3) / 苏明哲+王海涛(+2) / 李明远-王海涛(-3) —— 我的两个朋友互相敌视",
-      "林子豪+陈国栋(+2) / 林子豪+周文彬(+2) / 陈国栋-周文彬(-3) —— 骑墙者的困境",
-      "陈国栋-周文彬(-3) / 陈国栋-许宏伟(-2) / 周文彬-许宏伟(-2) —— 三巨头互相敌对"
-    ]
+    "cross_circle": "苏明哲和林子豪在公司圈是「朋友」,在同学圈是「死党」—— 同两个人在不同圈子里的关系互不干扰",
+    "shared_people": "苏明哲、林子豪同时属于两个圈子,但全库只有一条人员记录",
+    "company_factions": "公司圈应聚出 3 个圈子:技术派(陈国栋)、市场派(周文彬)、财务行政派(许宏伟)",
+    "company_straddler": "林子豪在公司圈应被标为骑墙者",
+    "company_intro_path": "公司圈里 苏明哲 → 周文彬 的引荐路径应为:苏明哲 → 林子豪 → 周文彬",
+    "company_top_ally": "公司圈以周文彬为目标时,可结盟名单第一名应是陈国栋",
+    "class_love_triangle": "同学圈:邵一鸣单恋温若琳、白宇航与温若琳暧昧,两人因此成为情敌",
+    "class_unstable_triangle": "同学圈应报出不稳定三角 {苏明哲, 邵一鸣, 白宇航} —— 我的室友和我的朋友是情敌"
   },
+
+  "circles": [
+    {"id": 1, "name": "公司圈", "kind": "公司", "icon": "🏢", "notes": "云帆科技,19 人"},
+    {"id": 2, "name": "同学圈", "kind": "班级", "icon": "🎓", "notes": "大学同班,8 人"}
+  ],
 
   "people": [
     {"id": 1,  "name": "陈国栋", "dept": "技术部", "title": "技术总监"},
@@ -33,61 +37,102 @@
     {"id": 16, "name": "苏明哲", "dept": "技术部", "title": "产品经理", "is_me": 1},
     {"id": 17, "name": "高伟",   "dept": "技术部", "title": "运维工程师"},
     {"id": 18, "name": "罗小敏", "dept": "市场部", "title": "市场专员"},
-    {"id": 19, "name": "曹明",   "dept": "财务部", "title": "出纳"}
+    {"id": 19, "name": "曹明",   "dept": "财务部", "title": "出纳"},
+
+    {"id": 20, "name": "江雨桐", "dept": "计算机三班", "title": "班长"},
+    {"id": 21, "name": "许清和", "dept": "计算机三班", "title": ""},
+    {"id": 22, "name": "邵一鸣", "dept": "计算机三班", "title": ""},
+    {"id": 23, "name": "温若琳", "dept": "计算机三班", "title": "文艺委员"},
+    {"id": 24, "name": "白宇航", "dept": "计算机三班", "title": "体育委员"},
+    {"id": 25, "name": "顾晓棠", "dept": "计算机三班", "title": ""}
+  ],
+
+  "memberships": [
+    {"person_id": 1,  "circle_id": 1}, {"person_id": 2,  "circle_id": 1},
+    {"person_id": 3,  "circle_id": 1}, {"person_id": 4,  "circle_id": 1},
+    {"person_id": 5,  "circle_id": 1}, {"person_id": 6,  "circle_id": 1},
+    {"person_id": 7,  "circle_id": 1}, {"person_id": 8,  "circle_id": 1},
+    {"person_id": 9,  "circle_id": 1}, {"person_id": 10, "circle_id": 1},
+    {"person_id": 11, "circle_id": 1}, {"person_id": 12, "circle_id": 1},
+    {"person_id": 13, "circle_id": 1}, {"person_id": 14, "circle_id": 1},
+    {"person_id": 15, "circle_id": 1}, {"person_id": 16, "circle_id": 1},
+    {"person_id": 17, "circle_id": 1}, {"person_id": 18, "circle_id": 1},
+    {"person_id": 19, "circle_id": 1},
+
+    {"person_id": 15, "circle_id": 2}, {"person_id": 16, "circle_id": 2},
+    {"person_id": 20, "circle_id": 2}, {"person_id": 21, "circle_id": 2},
+    {"person_id": 22, "circle_id": 2}, {"person_id": 23, "circle_id": 2},
+    {"person_id": 24, "circle_id": 2}, {"person_id": 25, "circle_id": 2}
   ],
 
   "relations": [
-    {"a_id": 1, "b_id": 2, "kind": "盟友",   "strength": 3, "notes": "技术部两根顶梁柱,一直同进退"},
-    {"a_id": 1, "b_id": 3, "kind": "盟友",   "strength": 2},
-    {"a_id": 1, "b_id": 4, "kind": "师徒",   "strength": 3, "notes": "赵晓峰是陈国栋一手带出来的"},
-    {"a_id": 2, "b_id": 4, "kind": "朋友",   "strength": 2},
-    {"a_id": 3, "b_id": 5, "kind": "朋友",   "strength": 2},
-    {"a_id": 1, "b_id": 5, "kind": "上下级", "strength": 1},
-    {"a_id": 2, "b_id": 5, "kind": "同事",   "strength": 1},
-    {"a_id": 4, "b_id": 5, "kind": "朋友",   "strength": 1},
+    {"circle_id": 1, "a_id": 1, "b_id": 2, "kind": "派系盟友", "strength": 3, "notes": "技术部两根顶梁柱,一直同进退"},
+    {"circle_id": 1, "a_id": 1, "b_id": 3, "kind": "派系盟友", "strength": 2},
+    {"circle_id": 1, "a_id": 1, "b_id": 4, "kind": "师徒",     "strength": 3, "notes": "赵晓峰是陈国栋一手带出来的"},
+    {"circle_id": 1, "a_id": 2, "b_id": 4, "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 3, "b_id": 5, "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 1, "b_id": 5, "kind": "上下级",   "strength": 1},
+    {"circle_id": 1, "a_id": 2, "b_id": 5, "kind": "同事",     "strength": 1},
+    {"circle_id": 1, "a_id": 4, "b_id": 5, "kind": "朋友",     "strength": 1},
 
-    {"a_id": 6, "b_id": 7,  "kind": "盟友",   "strength": 3},
-    {"a_id": 6, "b_id": 8,  "kind": "盟友",   "strength": 2},
-    {"a_id": 6, "b_id": 9,  "kind": "师徒",   "strength": 2},
-    {"a_id": 7, "b_id": 8,  "kind": "朋友",   "strength": 2},
-    {"a_id": 8, "b_id": 9,  "kind": "朋友",   "strength": 2},
-    {"a_id": 6, "b_id": 10, "kind": "提携",   "strength": 3, "notes": "何建军是周文彬提上来的"},
-    {"a_id": 9, "b_id": 10, "kind": "朋友",   "strength": 1},
+    {"circle_id": 1, "a_id": 6, "b_id": 7,  "kind": "派系盟友", "strength": 3},
+    {"circle_id": 1, "a_id": 6, "b_id": 8,  "kind": "派系盟友", "strength": 2},
+    {"circle_id": 1, "a_id": 6, "b_id": 9,  "kind": "师徒",     "strength": 2},
+    {"circle_id": 1, "a_id": 7, "b_id": 8,  "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 8, "b_id": 9,  "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 6, "b_id": 10, "kind": "提携",     "strength": 3, "notes": "何建军是周文彬提上来的"},
+    {"circle_id": 1, "a_id": 9, "b_id": 10, "kind": "朋友",     "strength": 1},
 
-    {"a_id": 11, "b_id": 12, "kind": "盟友",   "strength": 3},
-    {"a_id": 11, "b_id": 13, "kind": "盟友",   "strength": 2},
-    {"a_id": 11, "b_id": 14, "kind": "提携",   "strength": 2},
-    {"a_id": 12, "b_id": 13, "kind": "朋友",   "strength": 2},
-    {"a_id": 13, "b_id": 14, "kind": "朋友",   "strength": 1},
+    {"circle_id": 1, "a_id": 11, "b_id": 12, "kind": "派系盟友", "strength": 3},
+    {"circle_id": 1, "a_id": 11, "b_id": 13, "kind": "派系盟友", "strength": 2},
+    {"circle_id": 1, "a_id": 11, "b_id": 14, "kind": "提携",     "strength": 2},
+    {"circle_id": 1, "a_id": 12, "b_id": 13, "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 13, "b_id": 14, "kind": "朋友",     "strength": 1},
 
-    {"a_id": 1,  "b_id": 6,  "kind": "敌对",     "strength": -3, "notes": "预算和人头常年互掐"},
-    {"a_id": 1,  "b_id": 11, "kind": "敌对",     "strength": -2, "notes": "技术投入被财务卡了两次"},
-    {"a_id": 6,  "b_id": 11, "kind": "敌对",     "strength": -2, "notes": "市场费用报销的旧账"},
-    {"a_id": 2,  "b_id": 8,  "kind": "竞争",     "strength": -2},
-    {"a_id": 3,  "b_id": 7,  "kind": "利益冲突", "strength": -2},
-    {"a_id": 6,  "b_id": 13, "kind": "敌对",     "strength": -2, "notes": "去年裁员方案闹翻"},
-    {"a_id": 2,  "b_id": 3,  "kind": "敌对",     "strength": -3, "notes": "前后端互相甩锅,积怨很深"},
+    {"circle_id": 1, "a_id": 1,  "b_id": 6,  "kind": "敌对",     "strength": -3, "notes": "预算和人头常年互掐"},
+    {"circle_id": 1, "a_id": 1,  "b_id": 11, "kind": "敌对",     "strength": -2, "notes": "技术投入被财务卡了两次"},
+    {"circle_id": 1, "a_id": 6,  "b_id": 11, "kind": "敌对",     "strength": -2, "notes": "市场费用报销的旧账"},
+    {"circle_id": 1, "a_id": 2,  "b_id": 8,  "kind": "竞争",     "strength": -2},
+    {"circle_id": 1, "a_id": 3,  "b_id": 7,  "kind": "利益冲突", "strength": -2},
+    {"circle_id": 1, "a_id": 6,  "b_id": 13, "kind": "敌对",     "strength": -2, "notes": "去年裁员方案闹翻"},
+    {"circle_id": 1, "a_id": 2,  "b_id": 3,  "kind": "敌对",     "strength": -3, "notes": "前后端互相甩锅,积怨很深"},
 
-    {"a_id": 16, "b_id": 1,  "kind": "朋友", "strength": 2},
-    {"a_id": 16, "b_id": 2,  "kind": "朋友", "strength": 3, "notes": "一起做过两个项目"},
-    {"a_id": 16, "b_id": 3,  "kind": "朋友", "strength": 2},
-    {"a_id": 16, "b_id": 15, "kind": "朋友", "strength": 2},
+    {"circle_id": 1, "a_id": 16, "b_id": 1,  "kind": "朋友", "strength": 2},
+    {"circle_id": 1, "a_id": 16, "b_id": 2,  "kind": "朋友", "strength": 3, "notes": "一起做过两个项目"},
+    {"circle_id": 1, "a_id": 16, "b_id": 3,  "kind": "朋友", "strength": 2},
+    {"circle_id": 1, "a_id": 16, "b_id": 15, "kind": "朋友", "strength": 2},
 
-    {"a_id": 15, "b_id": 1,  "kind": "朋友", "strength": 2},
-    {"a_id": 15, "b_id": 6,  "kind": "朋友", "strength": 2, "notes": "两边都吃得开"},
-    {"a_id": 15, "b_id": 11, "kind": "认识", "strength": 1},
+    {"circle_id": 1, "a_id": 15, "b_id": 1,  "kind": "朋友",     "strength": 2},
+    {"circle_id": 1, "a_id": 15, "b_id": 6,  "kind": "朋友",     "strength": 2, "notes": "两边都吃得开"},
+    {"circle_id": 1, "a_id": 15, "b_id": 11, "kind": "点头之交", "strength": 1},
 
-    {"a_id": 17, "b_id": 4,  "kind": "同事",   "strength": 1},
-    {"a_id": 17, "b_id": 5,  "kind": "朋友",   "strength": 1},
-    {"a_id": 7,  "b_id": 18, "kind": "上下级", "strength": 1},
-    {"a_id": 18, "b_id": 9,  "kind": "朋友",   "strength": 1},
-    {"a_id": 12, "b_id": 19, "kind": "上下级", "strength": 1},
-    {"a_id": 19, "b_id": 11, "kind": "同事",   "strength": 1}
+    {"circle_id": 1, "a_id": 17, "b_id": 4,  "kind": "同事",   "strength": 1},
+    {"circle_id": 1, "a_id": 17, "b_id": 5,  "kind": "朋友",   "strength": 1},
+    {"circle_id": 1, "a_id": 7,  "b_id": 18, "kind": "上下级", "strength": 1},
+    {"circle_id": 1, "a_id": 18, "b_id": 9,  "kind": "朋友",   "strength": 1},
+    {"circle_id": 1, "a_id": 12, "b_id": 19, "kind": "上下级", "strength": 1},
+    {"circle_id": 1, "a_id": 19, "b_id": 11, "kind": "同事",   "strength": 1},
+
+    {"circle_id": 2, "a_id": 16, "b_id": 15, "kind": "死党", "strength": 3, "notes": "大学四年一个宿舍楼,后来又成了同事"},
+    {"circle_id": 2, "a_id": 20, "b_id": 21, "kind": "情侣", "strength": 3, "notes": "大二在一起,班里公开的一对"},
+    {"circle_id": 2, "a_id": 22, "b_id": 23, "kind": "单恋", "strength": 2, "notes": "邵一鸣追了两年,温若琳一直没答应"},
+    {"circle_id": 2, "a_id": 24, "b_id": 23, "kind": "暧昧", "strength": 2, "notes": "最近走得很近,还没挑明"},
+    {"circle_id": 2, "a_id": 22, "b_id": 24, "kind": "情敌", "strength": -2, "notes": "都喜欢温若琳,从室友变成见面不说话"},
+    {"circle_id": 2, "a_id": 16, "b_id": 22, "kind": "室友", "strength": 2, "notes": "上下铺"},
+    {"circle_id": 2, "a_id": 16, "b_id": 24, "kind": "朋友", "strength": 2, "notes": "一起打球认识的"},
+    {"circle_id": 2, "a_id": 23, "b_id": 25, "kind": "死党", "strength": 3},
+    {"circle_id": 2, "a_id": 20, "b_id": 23, "kind": "朋友", "strength": 2},
+    {"circle_id": 2, "a_id": 16, "b_id": 20, "kind": "同学", "strength": 1},
+    {"circle_id": 2, "a_id": 21, "b_id": 25, "kind": "同学", "strength": 1},
+    {"circle_id": 2, "a_id": 15, "b_id": 24, "kind": "竞争", "strength": -2, "notes": "当年竞选学生会主席,结了梁子"}
   ],
 
   "events": [
-    {"happened_at": 1767225600, "text": "季度评审会上陈国栋和周文彬为明年预算分配当场吵起来,会议提前结束。", "people_json": "[1, 6]"},
-    {"happened_at": 1769817600, "text": "李明远和王海涛因为线上事故的责任归属在群里互相甩锅,陈国栋出面才压下去。", "people_json": "[2, 3, 1]"},
-    {"happened_at": 1772236800, "text": "林子豪牵头的战略复盘会,难得把陈国栋和周文彬都请到了同一个会议室。", "people_json": "[15, 1, 6]"}
+    {"circle_id": 1, "happened_at": 1767225600, "text": "季度评审会上陈国栋和周文彬为明年预算分配当场吵起来,会议提前结束。", "people_json": "[1, 6]"},
+    {"circle_id": 1, "happened_at": 1769817600, "text": "李明远和王海涛因为线上事故的责任归属在群里互相甩锅,陈国栋出面才压下去。", "people_json": "[2, 3, 1]"},
+    {"circle_id": 1, "happened_at": 1772236800, "text": "林子豪牵头的战略复盘会,难得把陈国栋和周文彬都请到了同一个会议室。", "people_json": "[15, 1, 6]"},
+    {"circle_id": 2, "happened_at": 1764547200, "text": "毕业五周年聚会上,邵一鸣看到白宇航和温若琳一起来的,全程没怎么说话。", "people_json": "[22, 24, 23]"},
+    {"circle_id": 2, "happened_at": 1770940800, "text": "邵一鸣私下跟我说,他大二就跟温若琳表白过,被拒了但一直没放下。", "people_json": "[22, 23, 16]"},
+    {"circle_id": 2, "happened_at": 1773532800, "text": "白宇航发朋友圈晒和温若琳的合照,邵一鸣当天就把他删了。", "people_json": "[24, 23, 22]"}
   ]
 }

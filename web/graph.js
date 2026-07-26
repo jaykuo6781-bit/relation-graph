@@ -1,201 +1,237 @@
 /* 图谱渲染 —— 手机端只做"画",不做任何计算。
  *
- * 坐标是服务端算好的(力导向迭代跑在电脑上),这里拿到就直接生成 SVG。
- * 平移和缩放只改一个 CSS transform,由 GPU 合成,不触发 SVG 重排、
- * 不跑 requestAnimationFrame 循环 —— 这是手机不发热的关键。
+ * 坐标、弧线控制点、标签落点、类别标记符,全部由服务端算好送过来。
+ * 这里只把它们拼成 SVG,然后平移缩放只改一个 CSS transform,
+ * 由 GPU 合成 —— 没有物理循环、没有逐帧计算,所以手机不发热。
  *
- * 配色经 dataviz 校验脚本验证(浅色/深色双主题、all-pairs 模式全部通过):
- *   派系(分类)  取分类色板前 3 槽,第 4 个及以后的圈子归为中性灰
- *                 —— 全配对模式下只有前 3 槽能同时满足色觉障碍与常视觉分辨阈
- *   关系正负     取发散色板 蓝↔红,并给负向边加虚线作为第二重编码
- *                 (不依赖颜色也能区分,对色觉障碍和黑白打印都成立)
+ * 视觉编码(三个维度,只有一个占用颜色):
+ *   关系正负  → 颜色(蓝↔红发散色板,经色觉障碍校验;不用红/绿)
+ *   关系强度  → 线宽
+ *   关系类别  → 中点标记符 ♥情感 ¥利益 ▪职场 ●社交 ✎学缘 ⌂亲缘
+ *   负向关系  → 额外加虚线(第二重编码,不靠颜色也能分辨)
+ *   派系      → 节点填色(分类色板前 3 槽,其余中性灰)
+ *   关键人物  → 节点大小(中介中心性)
+ *
+ * 发光效果用 SVG 径向渐变画的同心光晕,**不用 filter**。
+ * iOS Safari 上 filter/backdrop-filter 极慢,用它做发光会直接把
+ * 服务端算布局省下来的功耗全赔进去。
+ *
+ * 颜色全部走 CSS 自定义属性,所以系统切换深浅色时浏览器直接重新着色,
+ * 不需要重建 SVG。
  */
 
 const GraphView = (() => {
-  const SVG_NS = "http://www.w3.org/2000/svg";
-
-  // dataviz 分类色板前三槽 + 中性灰(第 4 个及以后的圈子)
-  const FACTION = {
-    light: ["#2a78d6", "#eb6834", "#1baf7a"],
-    dark:  ["#3987e5", "#d95926", "#199e70"],
-  };
-  const OTHER = { light: "#8b909c", dark: "#767d8c" };
-  // 发散色板:正向 ↔ 负向
-  const EDGE = {
-    light: { pos: "#2a78d6", neg: "#e34948" },
-    dark:  { pos: "#3987e5", neg: "#e66767" },
-  };
-
   let stage, canvas, svg;
   let data = null;
   let tx = 0, ty = 0, scale = 1;
-  let onNodeTap = null;
-  let rankOfFaction = new Map();
-
-  const isDark = () =>
-    !window.matchMedia || !window.matchMedia("(prefers-color-scheme: light)").matches;
-
-  const mode = () => (isDark() ? "dark" : "light");
-
-  function factionColor(fid) {
-    const rank = rankOfFaction.get(fid);
-    const pal = FACTION[mode()];
-    return rank !== undefined && rank < pal.length ? pal[rank] : OTHER[mode()];
-  }
-
-  function apply() {
-    canvas.style.transform =
-      `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
-  }
+  let cb = {};
 
   function init(opts) {
     stage = document.getElementById("stage");
     canvas = document.getElementById("canvas");
     svg = document.getElementById("svg");
-    onNodeTap = opts && opts.onNodeTap;
+    cb = opts || {};
     bindGestures();
-    if (window.matchMedia) {
-      window.matchMedia("(prefers-color-scheme: dark)")
-        .addEventListener("change", () => { if (data) render(data); });
-    }
   }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function apply() {
+    canvas.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
+  }
+
+  /* ---------------- 渲染 ---------------- */
 
   function render(payload) {
     data = payload;
-    svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
-    svg.setAttribute("width", payload.width);
-    svg.setAttribute("height", payload.height);
+    const W = payload.width, H = payload.height;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", W);
+    svg.setAttribute("height", H);
 
-    // 按圈子人数排名 —— 人最多的三个圈子拿到分类色,其余归中性灰
-    const size = new Map();
-    payload.nodes.forEach(n => size.set(n.faction, (size.get(n.faction) || 0) + 1));
-    rankOfFaction = new Map(
-      [...size.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])
-        .map(([fid], i) => [fid, i]));
+    const out = [];
 
-    const ec = EDGE[mode()];
-    const parts = [];
+    // 光晕用的径向渐变:每个派系配色一个。纯填充,不是滤镜。
+    out.push("<defs>");
+    for (let i = 0; i < 4; i++) {
+      const v = i === 3 ? "--f0" : `--f${i + 1}`;
+      out.push(
+        `<radialGradient id="halo${i}">` +
+        `<stop offset="35%" stop-color="var(${v})" stop-opacity="0.55"/>` +
+        `<stop offset="100%" stop-color="var(${v})" stop-opacity="0"/>` +
+        `</radialGradient>`);
+    }
+    out.push("</defs>");
 
-    // 边先画,压在节点下面
-    parts.push('<g id="edges">');
+    // --- 边(先画,压在节点下面)---
+    out.push('<g id="edges">');
     for (const e of payload.edges) {
       const neg = e.w < 0;
-      const color = neg ? ec.neg : ec.pos;
-      // 负向边用虚线 —— 第二重编码,不靠颜色也能分辨
-      const dash = neg ? ' stroke-dasharray="7 5"' : "";
-      parts.push(
-        `<line class="edge" data-a="${e.a}" data-b="${e.b}" ` +
-        `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}" ` +
-        `stroke="${color}" stroke-width="${e.width}" ` +
-        `opacity="${neg ? 0.72 : 0.5}"${dash}/>`);
+      const cls = neg ? "neg" : "pos";
+      const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
+      const dash = neg ? ' stroke-dasharray="8 6"' : "";
+      out.push(
+        `<g class="eg" data-a="${e.a}" data-b="${e.b}">` +
+        `<path class="edge ${cls}" d="${d}" stroke-width="${e.width}"${dash}/>` +
+        `<path class="edge-hit" d="${d}"/>` +
+        `<text class="eglyph ${cls}" x="${e.mx}" y="${e.my}">${esc(e.glyph)}</text>` +
+        `<text class="elabel" x="${e.mx}" y="${e.my - 15}">${esc(e.label)}` +
+        (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
+        `</g>`);
     }
-    parts.push("</g>");
+    out.push("</g>");
 
-    parts.push('<g id="nodes">');
+    // --- 节点 ---
+    out.push('<g id="nodes">');
     for (const n of payload.nodes) {
-      const fill = factionColor(n.faction);
-      const cls = "node" + (n.is_me ? " me" : "");
-      parts.push(
+      const slot = n.frank < 3 ? n.frank : 3;      // 前三大派系上色,其余灰
+      const cls = "node f" + (slot === 3 ? "0" : slot + 1) + (n.is_me ? " me" : "");
+      out.push(
         `<g class="${cls}" data-id="${n.id}">` +
-        `<circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${fill}"/>` +
-        `<text class="blurable" x="${n.x}" y="${n.y + n.r + 15}">` +
-        `${esc(n.name)}</text></g>`);
+        `<circle class="halo" cx="${n.x}" cy="${n.y}" r="${(n.r * 2.9).toFixed(1)}" ` +
+        `fill="url(#halo${slot})"/>` +
+        (n.is_me
+          ? `<circle class="ring" cx="${n.x}" cy="${n.y}" r="${(n.r + 5).toFixed(1)}"/>`
+          : "") +
+        `<circle class="disc" cx="${n.x}" cy="${n.y}" r="${n.r}"/>` +
+        `<text class="ini" x="${n.x}" y="${n.y}">${esc(n.initial)}</text>` +
+        `<text class="nm" x="${n.x}" y="${(n.y + n.r + 15).toFixed(1)}">` +
+        `${esc(n.name)}</text>` +
+        `</g>`);
     }
-    parts.push("</g>");
+    out.push("</g>");
 
-    svg.innerHTML = parts.join("");
+    svg.innerHTML = out.join("");
 
     svg.querySelectorAll(".node").forEach(g => {
       g.addEventListener("click", ev => {
         ev.stopPropagation();
-        if (onNodeTap) onNodeTap(parseInt(g.dataset.id, 10));
+        if (cb.onNode) cb.onNode(+g.dataset.id);
+      });
+    });
+    svg.querySelectorAll(".eg .edge-hit").forEach(p => {
+      p.addEventListener("click", ev => {
+        ev.stopPropagation();
+        const g = p.parentNode;
+        if (cb.onEdge) cb.onEdge(+g.dataset.a, +g.dataset.b);
       });
     });
   }
 
-  function esc(s) {
-    return String(s).replace(/[&<>"]/g, c =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  }
+  /* ---------------- 选中态 ---------------- */
 
-  /* 高亮某人及其直接关系,其余淡出 */
   function focus(pid) {
-    if (pid === null || pid === undefined) {
-      svg.querySelectorAll(".node").forEach(g => g.classList.remove("dim"));
-      svg.querySelectorAll(".edge").forEach(l => (l.style.opacity = ""));
+    if (pid == null) {
+      svg.classList.remove("focused");
+      svg.querySelectorAll(".near,.sel").forEach(el =>
+        el.classList.remove("near", "sel"));
       return;
     }
     const near = new Set([pid]);
-    svg.querySelectorAll(".edge").forEach(l => {
-      const a = +l.dataset.a, b = +l.dataset.b;
-      if (a === pid || b === pid) { near.add(a); near.add(b); l.style.opacity = "0.95"; }
-      else l.style.opacity = "0.06";
+    svg.querySelectorAll(".eg").forEach(g => {
+      const a = +g.dataset.a, b = +g.dataset.b;
+      const hit = a === pid || b === pid;
+      g.querySelectorAll(".edge,.eglyph,.elabel").forEach(el =>
+        el.classList.toggle("near", hit));
+      if (hit) { near.add(a); near.add(b); }
     });
     svg.querySelectorAll(".node").forEach(g => {
-      g.classList.toggle("dim", !near.has(+g.dataset.id));
+      const id = +g.dataset.id;
+      g.classList.toggle("near", near.has(id));
+      g.classList.toggle("sel", id === pid);
     });
+    svg.classList.add("focused");
   }
 
-  function fit() {
+  function focusEdge(a, b) {
+    svg.querySelectorAll(".near,.sel").forEach(el =>
+      el.classList.remove("near", "sel"));
+    svg.querySelectorAll(".eg").forEach(g => {
+      const hit = (+g.dataset.a === a && +g.dataset.b === b) ||
+                  (+g.dataset.a === b && +g.dataset.b === a);
+      g.querySelectorAll(".edge,.eglyph,.elabel").forEach(el =>
+        el.classList.toggle("near", hit));
+    });
+    svg.querySelectorAll(".node").forEach(g => {
+      const id = +g.dataset.id;
+      g.classList.toggle("near", id === a || id === b);
+    });
+    svg.classList.add("focused");
+  }
+
+  /* ---------------- 视口 ---------------- */
+
+  function fit(bottomInset) {
     if (!data || !data.nodes.length) return;
     const xs = data.nodes.map(n => n.x), ys = data.nodes.map(n => n.y);
-    const pad = 60;
+    const pad = 70;
     const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
     const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
     const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
     const r = stage.getBoundingClientRect();
-    scale = Math.min(r.width / w, r.height / h);
-    scale = Math.max(0.15, Math.min(3, scale));
+    const inset = bottomInset || 0;
+    const availH = Math.max(120, r.height - inset);
+    scale = Math.max(0.15, Math.min(2.6, Math.min(r.width / w, availH / h)));
     tx = (r.width - w * scale) / 2 - minX * scale;
-    ty = (r.height - h * scale) / 2 - minY * scale;
+    ty = (availH - h * scale) / 2 - minY * scale;
     apply();
   }
 
-  /* ---------- 手势 ----------
-     全程只更新 tx/ty/scale 三个数,然后写一次 CSS transform。
-     不重建 SVG、不重算布局 —— 所以 CPU 占用可以忽略。            */
-  function bindGestures() {
-    let mode_ = null;          // "pan" | "pinch"
-    let startX = 0, startY = 0, startTx = 0, startTy = 0;
-    let startDist = 0, startScale = 1, pivot = null;
-    let moved = false;
+  function centerOn(pid, bottomInset) {
+    if (!data) return;
+    const n = data.nodes.find(x => x.id === pid);
+    if (!n) return;
+    const r = stage.getBoundingClientRect();
+    const availH = Math.max(120, r.height - (bottomInset || 0));
+    scale = Math.max(scale, 0.9);
+    tx = r.width / 2 - n.x * scale;
+    ty = availH / 2 - n.y * scale;
+    apply();
+  }
 
-    const dist = (t1, t2) =>
-      Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-    const mid = (t1, t2) => ({
-      x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2,
-    });
+  /* ---------------- 手势 ----------------
+     全程只更新 tx/ty/scale 三个数,然后写一次 CSS transform。
+     不重建 SVG、不重算布局 —— CPU 占用可以忽略。 */
+
+  function bindGestures() {
+    let mode = null, moved = false;
+    let sx = 0, sy = 0, stx = 0, sty = 0;
+    let sdist = 0, sscale = 1, pivot = null;
+
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 
     stage.addEventListener("touchstart", e => {
       if (e.touches.length === 1) {
-        mode_ = "pan"; moved = false;
-        startX = e.touches[0].clientX; startY = e.touches[0].clientY;
-        startTx = tx; startTy = ty;
+        mode = "pan"; moved = false;
+        sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+        stx = tx; sty = ty;
       } else if (e.touches.length === 2) {
-        mode_ = "pinch";
-        startDist = dist(e.touches[0], e.touches[1]) || 1;
-        startScale = scale;
-        const m = mid(e.touches[0], e.touches[1]);
+        mode = "pinch"; moved = true;
+        sdist = dist(e.touches[0], e.touches[1]) || 1;
+        sscale = scale;
         const r = stage.getBoundingClientRect();
-        pivot = { x: m.x - r.left, y: m.y - r.top };
-        startTx = tx; startTy = ty;
+        pivot = {
+          x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
+          y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
+        };
+        stx = tx; sty = ty;
       }
     }, { passive: true });
 
     stage.addEventListener("touchmove", e => {
-      if (mode_ === "pan" && e.touches.length === 1) {
-        const dx = e.touches[0].clientX - startX;
-        const dy = e.touches[0].clientY - startY;
+      if (mode === "pan" && e.touches.length === 1) {
+        const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
         if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
-        tx = startTx + dx; ty = startTy + dy;
+        tx = stx + dx; ty = sty + dy;
         apply();
-      } else if (mode_ === "pinch" && e.touches.length === 2) {
-        moved = true;
-        const k = dist(e.touches[0], e.touches[1]) / startDist;
-        const ns = Math.max(0.1, Math.min(6, startScale * k));
-        // 以两指中点为锚保持不动
-        tx = pivot.x - (pivot.x - startTx) * (ns / startScale);
-        ty = pivot.y - (pivot.y - startTy) * (ns / startScale);
+      } else if (mode === "pinch" && e.touches.length === 2) {
+        const ns = Math.max(0.1, Math.min(6,
+          sscale * (dist(e.touches[0], e.touches[1]) / sdist)));
+        tx = pivot.x - (pivot.x - stx) * (ns / sscale);
+        ty = pivot.y - (pivot.y - sty) * (ns / sscale);
         scale = ns;
         apply();
       }
@@ -204,30 +240,34 @@ const GraphView = (() => {
 
     stage.addEventListener("touchend", e => {
       if (e.touches.length === 0) {
-        if (mode_ === "pan" && !moved && onNodeTap) onNodeTap(null); // 点空白处收起
-        mode_ = null;
+        if (mode === "pan" && !moved && cb.onBlank) cb.onBlank();
+        mode = null;
       }
     });
 
-    // 桌面端:拖拽 + 滚轮
+    // 桌面端
     let dragging = false;
     stage.addEventListener("mousedown", e => {
       dragging = true; moved = false;
-      startX = e.clientX; startY = e.clientY; startTx = tx; startTy = ty;
+      sx = e.clientX; sy = e.clientY; stx = tx; sty = ty;
     });
     window.addEventListener("mousemove", e => {
       if (!dragging) return;
-      const dx = e.clientX - startX, dy = e.clientY - startY;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
-      tx = startTx + dx; ty = startTy + dy;
+      tx = stx + dx; ty = sty + dy;
       apply();
     });
-    window.addEventListener("mouseup", () => { dragging = false; });
+    window.addEventListener("mouseup", () => {
+      if (dragging && !moved && cb.onBlank) cb.onBlank();
+      dragging = false;
+    });
     stage.addEventListener("wheel", e => {
       e.preventDefault();
       const r = stage.getBoundingClientRect();
       const px = e.clientX - r.left, py = e.clientY - r.top;
-      const ns = Math.max(0.1, Math.min(6, scale * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+      const ns = Math.max(0.1, Math.min(6,
+        scale * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
       tx = px - (px - tx) * (ns / scale);
       ty = py - (py - ty) * (ns / scale);
       scale = ns;
@@ -235,16 +275,13 @@ const GraphView = (() => {
     }, { passive: false });
   }
 
-  function centerOn(pid) {
-    if (!data) return;
-    const n = data.nodes.find(x => x.id === pid);
-    if (!n) return;
-    const r = stage.getBoundingClientRect();
-    scale = Math.max(scale, 1);
-    tx = r.width / 2 - n.x * scale;
-    ty = r.height / 2 - n.y * scale;
-    apply();
+  /* 给卡片里的头像用,保证跟图上颜色一致 */
+  function nodeColor(id) {
+    if (!data) return "var(--f0)";
+    const n = data.nodes.find(x => x.id === id);
+    if (!n) return "var(--f0)";
+    return n.frank < 3 ? `var(--f${n.frank + 1})` : "var(--f0)";
   }
 
-  return { init, render, fit, focus, centerOn, factionColor };
+  return { init, render, fit, focus, focusEdge, centerOn, nodeColor };
 })();

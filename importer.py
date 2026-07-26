@@ -17,7 +17,9 @@ PAIR_SEPS = ["->", "→", "-->", "<->", "—", "–", "－", "-", "与", "和", 
 # 姓名和关系类型之间的分隔符
 KIND_SEPS = [":", "：", "=", "＝"]
 
-DEFAULT_STRENGTH = {1: 2, -1: -2, 0: 0}
+def _default_strength(kind):
+    info = db.RELATION_KINDS.get(kind) or {}
+    return info.get("default", 0)
 
 
 def _split_first(text, seps):
@@ -68,13 +70,14 @@ def parse_roster(text):
     return rows
 
 
-def commit_roster(rows):
+def commit_roster(rows, circle_id):
     created = updated = 0
     for r in rows:
         if r.get("status") == "skip" or not r.get("name"):
             continue
         _, is_new = db.upsert_person(r["name"], r.get("dept", ""),
-                                     r.get("title", ""))
+                                     r.get("title", ""),
+                                     circle_id=circle_id)
         if is_new:
             created += 1
         else:
@@ -129,19 +132,25 @@ def parse_relations(text, auto_create=False):
             kind_text = kind_part
 
         kind = None
+        # 先按新词表精确匹配,再试 v1 的旧类型名(比如"盟友")
         for k in db.RELATION_KINDS:
             if k in kind_text:
                 kind = k
                 break
         if kind is None:
+            for old, new in db.LEGACY_KIND_MAP.items():
+                if old in kind_text:
+                    kind = new
+                    break
+        if kind is None:
             rows.append(_bad(
                 lineno, line,
-                f"无法识别的关系类型「{kind_text}」。可用:"
-                + "、".join(db.RELATION_KINDS)))
+                f"无法识别的关系类型「{kind_text}」。"
+                f"可用类型见录入页的说明"))
             continue
 
         if strength is None:
-            strength = DEFAULT_STRENGTH[db.RELATION_KINDS[kind]]
+            strength = _default_strength(kind)
         strength = max(-3, min(3, strength))
 
         pa = db.find_person_by_name(a_name)
@@ -172,7 +181,7 @@ def _bad(lineno, raw, message):
             "a_name": "", "b_name": "", "kind": "", "strength": 0}
 
 
-def commit_relations(rows, auto_create=False):
+def commit_relations(rows, circle_id, auto_create=False):
     saved = 0
     created_people = 0
     errors = []
@@ -184,14 +193,15 @@ def commit_relations(rows, auto_create=False):
 
         a_id, b_id = r.get("a_id"), r.get("b_id")
         if a_id is None:
-            a_id, is_new = db.upsert_person(r["a_name"])
+            a_id, is_new = db.upsert_person(r["a_name"], circle_id=circle_id)
             created_people += int(is_new)
         if b_id is None:
-            b_id, is_new = db.upsert_person(r["b_name"])
+            b_id, is_new = db.upsert_person(r["b_name"], circle_id=circle_id)
             created_people += int(is_new)
 
         try:
-            db.upsert_relation(a_id, b_id, r["kind"], r.get("strength", 0))
+            db.upsert_relation(circle_id, a_id, b_id, r["kind"],
+                               r.get("strength"))
             saved += 1
         except ValueError as e:
             errors.append({"line": r.get("line"), "message": str(e)})

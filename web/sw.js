@@ -1,7 +1,7 @@
 /* Service Worker:只缓存应用外壳,让"添加到主屏幕"后能立刻打开。
    数据接口一律走网络 —— 关系数据必须是最新的,缓存了反而误事。 */
 
-const CACHE = "relgraph-shell-v1";
+const CACHE = "relgraph-shell-v2";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/graph.js",
                "/manifest.json", "/icon.svg"];
 

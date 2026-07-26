@@ -23,15 +23,17 @@ import db
 #  图快照 —— 所有算法的共同输入
 # ============================================================
 
-def build_graph():
-    """把数据库里的关系压成一张带符号权重的图。
+def build_graph(circle_id=None):
+    """把某个圈子里的关系压成一张带符号权重的图。
+
+    circle_id=None 表示合并全部圈子(总览视图)。
 
     一对人之间可能同时存在多种关系(比如既是"上下级"又是"竞争"),
     这里把强度相加再截断到 [-3,3] 作为这条边的综合权重。相加是对的:
     "朋友+2" 叠加 "竞争-1" 得 +1,正好表达"关系不错但有竞争"。
     """
-    people = {p["id"]: p for p in db.list_people()}
-    relations = db.list_relations()
+    people = {p["id"]: p for p in db.list_people(circle_id)}
+    relations = db.list_relations(circle_id)
 
     pair_w = defaultdict(int)      # (min_id, max_id) -> 综合权重
     pair_kinds = defaultdict(list)  # (min_id, max_id) -> [(kind, strength, directed, a, b)]
@@ -42,9 +44,12 @@ def build_graph():
             continue
         key = (min(a, b), max(a, b))
         pair_w[key] += r["strength"]
+        info = db.RELATION_KINDS.get(r["kind"], {})
         pair_kinds[key].append({
-            "kind": r["kind"], "strength": r["strength"],
+            "id": r["id"], "kind": r["kind"], "strength": r["strength"],
             "directed": r["directed"], "a_id": a, "b_id": b,
+            "cat": info.get("cat", "社交"),
+            "notes": r.get("notes", ""),
         })
 
     for k in list(pair_w):
@@ -67,6 +72,7 @@ def build_graph():
             neg_adj[b][a] = w
 
     return {
+        "circle_id": circle_id,
         "people": people,
         "pair_w": dict(pair_w),
         "pair_kinds": dict(pair_kinds),
@@ -89,7 +95,7 @@ def _name(g, pid):
 #  1. 找敌人的敌人
 # ============================================================
 
-def enemies_of_enemy(target_id, me_id=None, limit=30):
+def enemies_of_enemy(target_id, me_id=None, limit=30, circle_id=None):
     """给定目标 X,列出与 X 有矛盾、且我拉拢得动的人。
 
     评分 = 矛盾烈度 × 可拉拢度
@@ -101,7 +107,7 @@ def enemies_of_enemy(target_id, me_id=None, limit=30):
     score = conflict × (3 + affinity),affinity=-3 时归零,
     也就是"我的敌人的敌人"不会被推荐 —— 这是对的,他不会帮我。
     """
-    g = build_graph()
+    g = build_graph(circle_id)
     if target_id not in g["people"]:
         return {"error": "找不到这个人"}
 
@@ -269,12 +275,12 @@ def _louvain(nodes, edges):
     return node_to_super
 
 
-def detect_factions():
+def detect_factions(circle_id=None):
     """识别圈子,并标出每个圈子的核心和骑墙的人。
 
     只用正向关系聚类 —— 敌对关系不构成"一伙的"。
     """
-    g = build_graph()
+    g = build_graph(circle_id)
     nodes = list(g["people"].keys())
     pos_edges = {k: w for k, w in g["pair_w"].items() if w > 0}
 
@@ -380,9 +386,9 @@ def _brandes(nodes, adj):
     return cb
 
 
-def key_people(limit=20):
+def key_people(limit=20, circle_id=None):
     """桥梁人物排行。"""
-    g = build_graph()
+    g = build_graph(circle_id)
     nodes = list(g["people"].keys())
     if not nodes:
         return {"people": []}
@@ -407,13 +413,13 @@ def key_people(limit=20):
     return {"people": rows[:limit]}
 
 
-def intro_path(from_id, to_id):
+def intro_path(from_id, to_id, circle_id=None):
     """我要接触某人,最短该托谁引荐。
 
     只走正向关系,边的代价 = 1/强度 —— 交情越铁,这一跳越"便宜",
     所以算法会优先选强关系链而不是单纯的短链。
     """
-    g = build_graph()
+    g = build_graph(circle_id)
     if from_id not in g["people"] or to_id not in g["people"]:
         return {"error": "找不到这个人"}
     if from_id == to_id:
@@ -466,7 +472,7 @@ def intro_path(from_id, to_id):
 #  4. 不稳定三角(海德结构平衡理论)
 # ============================================================
 
-def unstable_triangles(limit=40, focus_id=None):
+def unstable_triangles(limit=40, focus_id=None, circle_id=None):
     """找出结构上不稳定的三角关系。
 
     海德平衡理论:三条边的符号乘积为正则稳定,为负则不稳定。
@@ -478,7 +484,7 @@ def unstable_triangles(limit=40, focus_id=None):
     不稳定的三角是有张力的,局势最可能在这里翻转 —— 这就是"主要矛盾"
     的落点。撬动价值取三边强度绝对值之积:牵涉的情绪越强,翻盘影响越大。
     """
-    g = build_graph()
+    g = build_graph(circle_id)
     adj = g["adj"]
     nodes = sorted(adj.keys())
 
@@ -542,15 +548,15 @@ def unstable_triangles(limit=40, focus_id=None):
 #  汇总:一个人的全套分析
 # ============================================================
 
-def brief(target_id):
+def brief(target_id, circle_id=None):
     """针对一个目标的一屏简报 —— "谋划"页的主接口。"""
     me = db.get_me()
     me_id = me["id"] if me else None
-    g = build_graph()
+    g = build_graph(circle_id)
     if target_id not in g["people"]:
         return {"error": "找不到这个人"}
 
-    fac = detect_factions()
+    fac = detect_factions(circle_id)
     my_faction = tgt_faction = None
     for f in fac["factions"]:
         ids = {m["id"] for m in f["members"]}
@@ -566,10 +572,12 @@ def brief(target_id):
             "dept": g["people"][target_id].get("dept", ""),
             "title": g["people"][target_id].get("title", ""),
         },
-        "allies": enemies_of_enemy(target_id, me_id, limit=10),
+        "allies": enemies_of_enemy(target_id, me_id, limit=10,
+                                   circle_id=circle_id),
         "faction": tgt_faction,
         "same_faction_as_me": bool(
             my_faction and tgt_faction and my_faction["id"] == tgt_faction["id"]),
-        "intro": intro_path(me_id, target_id) if me_id else None,
-        "triangles": unstable_triangles(limit=10, focus_id=target_id),
+        "intro": intro_path(me_id, target_id, circle_id) if me_id else None,
+        "triangles": unstable_triangles(limit=10, focus_id=target_id,
+                                        circle_id=circle_id),
     }

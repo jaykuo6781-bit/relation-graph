@@ -2,8 +2,11 @@
 
 用标准库 http.server 而不是 FastAPI/Flask,是刻意的取舍。这是要长期跑在
 个人电脑上的私人工具,依赖越少越不会因为环境变动而烂掉 —— 双击 run.bat
-就能起来,不需要 venv、不需要 pip install(除非用故事解析功能)。
-单用户、百来号人的规模,标准库完全够。
+就能起来,不需要 venv、不需要 pip install(除非用 AI 摄取功能)。
+
+**文件上传走 JSON + base64,不用 multipart。** 原因有两个:
+Python 3.13 删掉了 cgi 模块(以前解析 multipart 的标准做法),
+而且以后要移植微信小程序时,JSON 上传的兼容性远好过 multipart。
 """
 
 import json
@@ -32,6 +35,8 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
+MAX_BODY = 32 * 1024 * 1024      # 32MB —— 一张手机截图 base64 后大约 2~4MB
+
 ROUTES = {}
 
 
@@ -42,6 +47,21 @@ def route(method, path):
     return deco
 
 
+def _cid(query, body=None, required=False):
+    """从请求里取圈子 id。取不到就用默认圈子。"""
+    raw = None
+    if body and body.get("circle_id"):
+        raw = body["circle_id"]
+    elif query.get("circle"):
+        raw = query["circle"][0]
+    if raw in (None, "", "all"):
+        return None if not required else db.default_circle_id()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return db.default_circle_id() if required else None
+
+
 # ============================================================
 #  基础状态
 # ============================================================
@@ -50,18 +70,65 @@ def route(method, path):
 def api_state(handler, query, body):
     me = db.get_me()
     conn = db.connect()
-    n_people = conn.execute("SELECT COUNT(*) c FROM person").fetchone()["c"]
-    n_rel = conn.execute("SELECT COUNT(*) c FROM relation").fetchone()["c"]
-    n_ev = conn.execute("SELECT COUNT(*) c FROM event").fetchone()["c"]
+    circles = db.list_circles()
+    if not circles:
+        db.default_circle_id()
+        circles = db.list_circles()
     return {
         "me": me,
-        "counts": {"people": n_people, "relations": n_rel, "events": n_ev},
-        "kinds": db.RELATION_KINDS,
-        "directed_kinds": sorted(db.DIRECTED_KINDS),
+        "circles": circles,
+        "counts": {
+            "people": conn.execute("SELECT COUNT(*) c FROM person").fetchone()["c"],
+            "relations": conn.execute("SELECT COUNT(*) c FROM relation").fetchone()["c"],
+            "events": conn.execute("SELECT COUNT(*) c FROM event").fetchone()["c"],
+        },
+        "kinds": {k: v for k, v in db.RELATION_KINDS.items()},
+        "categories": db.RELATION_CATEGORIES,
+        "category_glyph": db.CATEGORY_GLYPH,
+        "circle_kinds": db.CIRCLE_KINDS,
         "llm_configured": config.llm_configured(),
         "llm_model": config.LLM_MODEL,
         "graph_version": db.graph_version(),
     }
+
+
+# ============================================================
+#  圈子
+# ============================================================
+
+@route("GET", "/api/circles")
+def api_circles(handler, query, body):
+    return {"circles": db.list_circles()}
+
+
+@route("POST", "/api/circles")
+def api_circle_save(handler, query, body):
+    if body.get("id"):
+        db.update_circle(int(body["id"]), **{
+            k: v for k, v in body.items() if k != "id"})
+        return {"ok": True, "id": int(body["id"])}
+    cid = db.create_circle(body.get("name", ""), body.get("kind", "自定义"),
+                           body.get("icon", ""), body.get("notes", ""))
+    return {"ok": True, "id": cid}
+
+
+@route("POST", "/api/circles/delete")
+def api_circle_delete(handler, query, body):
+    db.delete_circle(int(body["id"]))
+    return {"ok": True}
+
+
+@route("POST", "/api/circles/join")
+def api_circle_join(handler, query, body):
+    db.add_to_circle(int(body["person_id"]), int(body["circle_id"]),
+                     body.get("role", ""))
+    return {"ok": True}
+
+
+@route("POST", "/api/circles/leave")
+def api_circle_leave(handler, query, body):
+    db.remove_from_circle(int(body["person_id"]), int(body["circle_id"]))
+    return {"ok": True}
 
 
 # ============================================================
@@ -70,33 +137,38 @@ def api_state(handler, query, body):
 
 @route("GET", "/api/people")
 def api_people(handler, query, body):
-    return {"people": db.list_people()}
+    return {"people": db.list_people(_cid(query))}
 
 
 @route("GET", "/api/person")
 def api_person(handler, query, body):
     pid = int(query.get("id", [0])[0])
+    cid = _cid(query)
     person = db.get_person(pid)
     if not person:
         return {"error": "找不到这个人"}
     return {
         "person": person,
-        "relations": db.relations_of(pid),
-        "events": db.events_for_person(pid),
+        "circles": db.circles_of(pid),
+        "relations": db.relations_of(pid, cid),
+        "events": db.events_for_person(pid, cid),
     }
 
 
 @route("POST", "/api/people")
 def api_people_save(handler, query, body):
-    pid = body.get("id")
-    if pid:
-        db.update_person(int(pid), **{k: v for k, v in body.items()
-                                      if k != "id"})
-        return {"ok": True, "id": int(pid)}
+    if body.get("id"):
+        db.update_person(int(body["id"]),
+                         **{k: v for k, v in body.items()
+                            if k not in ("id", "circle_id")})
+        if body.get("circle_id"):
+            db.add_to_circle(int(body["id"]), int(body["circle_id"]))
+        return {"ok": True, "id": int(body["id"])}
     new_id, created = db.upsert_person(
         body.get("name", ""), body.get("dept", ""), body.get("title", ""),
         int(body.get("level", 0) or 0), body.get("aliases", ""),
-        body.get("tags", ""), body.get("notes", ""))
+        body.get("tags", ""), body.get("notes", ""),
+        circle_id=_cid(query, body, required=True))
     return {"ok": True, "id": new_id, "created": created}
 
 
@@ -118,14 +190,15 @@ def api_set_me(handler, query, body):
 
 @route("GET", "/api/relations")
 def api_relations(handler, query, body):
-    return {"relations": db.list_relations_detailed()}
+    return {"relations": db.list_relations_detailed(_cid(query))}
 
 
 @route("POST", "/api/relations")
 def api_relations_save(handler, query, body):
     rid = db.upsert_relation(
+        _cid(query, body, required=True),
         int(body["a_id"]), int(body["b_id"]), body["kind"],
-        int(body.get("strength", 0) or 0), body.get("notes", ""))
+        body.get("strength"), body.get("notes", ""))
     return {"ok": True, "id": rid}
 
 
@@ -135,6 +208,42 @@ def api_relations_delete(handler, query, body):
     return {"ok": True}
 
 
+@route("GET", "/api/pair")
+def api_pair(handler, query, body):
+    """两个人之间的一切:全部关系 + 他俩共同出现的故事时间线。
+
+    点击图上一条连线时调这个 —— 用户要的"人物之间的细节故事"。
+    """
+    a = int(query["a"][0])
+    b = int(query["b"][0])
+    cid = _cid(query)
+    pa, pb = db.get_person(a), db.get_person(b)
+    if not pa or not pb:
+        return {"error": "找不到这个人"}
+    rels = db.find_relations_between(a, b, cid)
+    for r in rels:
+        info = db.RELATION_KINDS.get(r["kind"], {})
+        r["cat"] = info.get("cat", "社交")
+        r["glyph"] = db.CATEGORY_GLYPH.get(r["cat"], "")
+    return {
+        "a": pa, "b": pb,
+        "relations": rels,
+        "stories": db.events_for_pair(a, b, cid),
+    }
+
+
+@route("POST", "/api/pair/story")
+def api_pair_story(handler, query, body):
+    """给某两个人之间追加一条故事。"""
+    a, b = int(body["a"]), int(body["b"])
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise ValueError("内容不能为空")
+    eid = db.add_event(text, [a, b], _cid(query, body, required=True),
+                       body.get("happened_at"), body.get("source", "手动"))
+    return {"ok": True, "id": eid}
+
+
 # ============================================================
 #  图谱(坐标在服务端算好)
 # ============================================================
@@ -142,39 +251,34 @@ def api_relations_delete(handler, query, body):
 @route("GET", "/api/graph")
 def api_graph(handler, query, body):
     t0 = time.time()
-    payload = layout.get_graph_payload()
+    payload = layout.get_graph_payload(_cid(query))
     payload["compute_ms"] = round((time.time() - t0) * 1000, 1)
     return payload
 
 
 # ============================================================
-#  分析
+#  分析(四个功能都折叠进节点卡片,不再单独开页)
 # ============================================================
 
 @route("GET", "/api/analysis/brief")
 def api_brief(handler, query, body):
-    return analysis.brief(int(query.get("id", [0])[0]))
-
-
-@route("GET", "/api/analysis/allies")
-def api_allies(handler, query, body):
-    me = db.get_me()
-    return analysis.enemies_of_enemy(
-        int(query.get("id", [0])[0]), me["id"] if me else None)
+    return analysis.brief(int(query.get("id", [0])[0]), _cid(query))
 
 
 @route("GET", "/api/analysis/factions")
 def api_factions(handler, query, body):
-    cached = db.cache_get("factions")
+    cid = _cid(query)
+    key = f"factions_{cid or 'all'}"
+    cached = db.cache_get(key)
     if cached is None:
-        cached = analysis.detect_factions()
-        db.cache_put("factions", cached)
+        cached = analysis.detect_factions(cid)
+        db.cache_put(key, cached)
     return cached
 
 
 @route("GET", "/api/analysis/key")
 def api_key_people(handler, query, body):
-    return analysis.key_people(limit=int(query.get("limit", [20])[0]))
+    return analysis.key_people(int(query.get("limit", [20])[0]), _cid(query))
 
 
 @route("GET", "/api/analysis/triangles")
@@ -182,7 +286,8 @@ def api_triangles(handler, query, body):
     focus = query.get("focus", [None])[0]
     return analysis.unstable_triangles(
         limit=int(query.get("limit", [40])[0]),
-        focus_id=int(focus) if focus else None)
+        focus_id=int(focus) if focus else None,
+        circle_id=_cid(query))
 
 
 @route("GET", "/api/analysis/path")
@@ -193,7 +298,7 @@ def api_path(handler, query, body):
         if not me:
             return {"error": "还没设置「我是谁」,无法计算引荐路径"}
         src = me["id"]
-    return analysis.intro_path(int(src), int(query["to"][0]))
+    return analysis.intro_path(int(src), int(query["to"][0]), _cid(query))
 
 
 # ============================================================
@@ -207,7 +312,8 @@ def api_roster_preview(handler, query, body):
 
 @route("POST", "/api/import/roster/commit")
 def api_roster_commit(handler, query, body):
-    return importer.commit_roster(body.get("rows", []))
+    return importer.commit_roster(body.get("rows", []),
+                                  _cid(query, body, required=True))
 
 
 @route("POST", "/api/import/relations/preview")
@@ -219,7 +325,8 @@ def api_rel_preview(handler, query, body):
 @route("POST", "/api/import/relations/commit")
 def api_rel_commit(handler, query, body):
     return importer.commit_relations(
-        body.get("rows", []), bool(body.get("auto_create")))
+        body.get("rows", []), _cid(query, body, required=True),
+        bool(body.get("auto_create")))
 
 
 # ============================================================
@@ -228,23 +335,15 @@ def api_rel_commit(handler, query, body):
 
 @route("GET", "/api/events")
 def api_events(handler, query, body):
-    return {"events": db.list_events()}
+    return {"events": db.list_events(_cid(query))}
 
 
 @route("POST", "/api/events")
 def api_events_add(handler, query, body):
     eid = db.add_event(body.get("text", ""),
                        [int(i) for i in body.get("people", [])],
-                       body.get("happened_at"))
-    # 顺手按事件调整关系强度
-    for adj in body.get("adjust", []):
-        try:
-            rid = db.upsert_relation(
-                int(adj["a_id"]), int(adj["b_id"]), adj["kind"],
-                int(adj.get("strength", 0)), notes=body.get("text", "")[:200])
-            db.link_event_relation(eid, rid, int(adj.get("strength", 0)))
-        except (KeyError, ValueError):
-            continue
+                       _cid(query, body, required=True),
+                       body.get("happened_at"), body.get("source", "手动"))
     return {"ok": True, "id": eid}
 
 
@@ -255,22 +354,29 @@ def api_events_delete(handler, query, body):
 
 
 # ============================================================
-#  模型故事解析
+#  AI 摄取(底部输入栏)
 # ============================================================
 
-@route("POST", "/api/llm/parse")
-def api_llm_parse(handler, query, body):
+@route("POST", "/api/ingest")
+def api_ingest(handler, query, body):
+    """文字 / 截图 / 文档 → 关系候选清单(等待人工审核)。
+
+    files: [{name, mime, data(base64)}]
+    """
     import llm
     try:
-        return llm.parse_story(body.get("text", ""))
+        return llm.ingest(
+            text=body.get("text", ""),
+            files=body.get("files") or [],
+            circle_id=_cid(query, body, required=True))
     except llm.LLMError as e:
         return {"error": str(e)}
 
 
-@route("POST", "/api/llm/commit")
-def api_llm_commit(handler, query, body):
+@route("POST", "/api/ingest/commit")
+def api_ingest_commit(handler, query, body):
     import llm
-    return llm.commit(body)
+    return llm.commit(body, _cid(query, body, required=True))
 
 
 # ============================================================
@@ -320,7 +426,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("  %s\n" % (fmt % args))
 
-    # ---- 工具 ----
     def _send(self, code, body, content_type="application/json; charset=utf-8",
               extra_headers=None):
         if isinstance(body, str):
@@ -355,14 +460,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, "not found", "text/plain; charset=utf-8")
 
         ctype, _ = mimetypes.guess_type(str(target))
-        if target.suffix == ".js":
-            ctype = "application/javascript; charset=utf-8"
-        elif target.suffix == ".css":
-            ctype = "text/css; charset=utf-8"
-        elif target.suffix == ".html":
-            ctype = "text/html; charset=utf-8"
-        elif target.suffix == ".json":
-            ctype = "application/json; charset=utf-8"
+        override = {".js": "application/javascript; charset=utf-8",
+                    ".css": "text/css; charset=utf-8",
+                    ".html": "text/html; charset=utf-8",
+                    ".json": "application/json; charset=utf-8",
+                    ".svg": "image/svg+xml"}
+        ctype = override.get(target.suffix, ctype)
         self._send(200, target.read_bytes(), ctype or "application/octet-stream")
 
     def _dispatch(self, method):
@@ -373,6 +476,10 @@ class Handler(BaseHTTPRequestHandler):
         body = {}
         if method == "POST":
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                return self._json(
+                    {"error": f"内容太大({length // 1048576}MB),"
+                              f"上限 {MAX_BODY // 1048576}MB"}, 413)
             if length:
                 raw = self.rfile.read(length)
                 try:
@@ -422,6 +529,7 @@ def main():
     allow_lan = "--lan" in sys.argv
     config.ensure_dirs()
     db.connect()
+    db.default_circle_id()          # 保证 UI 永远有圈子可选
 
     port = config.PORT
     ts_ip = config.detect_tailscale_ip()
@@ -497,7 +605,6 @@ def main():
         print("    1. 这台电脑装:https://tailscale.com/download/windows")
         print("    2. iPhone 也装,登录同一个账号")
         print("    3. 重新运行本程序,会自动检测到并打印手机用的地址")
-        print("    好处:只有你自己的设备能连,在外面用流量也能连。")
         print()
         print("  【临时】局域网模式:用 run-lan.bat 启动")
         if lan_ip:

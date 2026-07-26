@@ -6,7 +6,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="关系图">
-<meta name="theme-color" content="#14161a">
+<meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f4f8" media="(prefers-color-scheme: light)">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -16,10 +17,12 @@
 <body>
 
 <header id="topbar">
-  <div class="title" id="viewTitle">图谱</div>
+  <button id="circleBtn"></button>
   <div class="spacer"></div>
+  <button id="fitBtn" class="icon-btn" title="复位">⊹</button>
   <button id="maskBtn" class="icon-btn" title="打码 / 取消打码">🕶</button>
 </header>
+<div id="circleMenu" class="hidden"></div>
 
 <main id="views">
 
@@ -27,53 +30,34 @@
   <section class="view" id="view-graph">
     <div id="stage">
       <div id="canvas"><svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+      <div id="legend"></div>
       <div id="graphEmpty" class="empty hidden">
-        <p>还没有数据</p>
-        <button class="btn primary" data-goto="input">去录入</button>
-        <button class="btn" id="seedBtn2">载入演示数据</button>
+        <h3>这个圈子还是空的</h3>
+        <p style="margin:0">在下面说一句话,让 AI 帮你把关系理出来;<br>
+          或者去设置页批量导入名单。</p>
+        <button class="btn" onclick="loadSeed()">先看看演示数据</button>
       </div>
     </div>
-    <div id="graphBar">
-      <span id="graphStat" class="stat"></span>
-      <div class="spacer"></div>
-      <button class="chip" id="fitBtn">复位</button>
+
+    <div id="aibar">
+      <div id="aiFiles" class="hidden"></div>
+      <div class="ai-row">
+        <textarea id="aiInput" rows="1"
+          placeholder="说点什么,或丢一张聊天截图…"></textarea>
+        <button class="ai-btn" id="aiAttach" title="上传截图或文档">📎</button>
+        <button class="ai-btn send" id="aiSend" title="交给 AI">↑</button>
+      </div>
+      <input type="file" id="aiFile" class="hidden" multiple
+             accept="image/*,.txt,.md,.csv,.log,.pdf,.docx">
     </div>
-    <div id="nodeCard" class="sheet hidden"></div>
   </section>
 
-  <!-- ================= 查人 ================= -->
+  <!-- ================= 人物 ================= -->
   <section class="view hidden" id="view-people">
     <div class="pad">
-      <input id="peopleSearch" class="input" placeholder="搜索姓名 / 部门 / 职位" autocomplete="off">
-      <div id="peopleList" class="list"></div>
-    </div>
-    <div id="personCard" class="sheet hidden"></div>
-  </section>
-
-  <!-- ================= 谋划 ================= -->
-  <section class="view hidden" id="view-plan">
-    <div class="pad">
-      <div class="tabs" id="planTabs">
-        <button class="tab on" data-plan="brief">针对某人</button>
-        <button class="tab" data-plan="factions">派系</button>
-        <button class="tab" data-plan="key">关键人物</button>
-        <button class="tab" data-plan="tri">不稳定三角</button>
-      </div>
-      <div id="planBody"></div>
-    </div>
-  </section>
-
-  <!-- ================= 录入 ================= -->
-  <section class="view hidden" id="view-input">
-    <div class="pad">
-      <div class="tabs scroll" id="inputTabs">
-        <button class="tab on" data-input="rel">加关系</button>
-        <button class="tab" data-input="event">记事件</button>
-        <button class="tab" data-input="story">故事解析</button>
-        <button class="tab" data-input="roster">导名单</button>
-        <button class="tab" data-input="bulk">批量关系</button>
-      </div>
-      <div id="inputBody"></div>
+      <input id="peopleSearch" class="input" placeholder="搜索姓名 / 部门 / 职位"
+             autocomplete="off" oninput="renderPeople()">
+      <div id="peopleList" class="list" style="margin-top:12px"></div>
     </div>
   </section>
 
@@ -82,17 +66,19 @@
     <div class="pad" id="settingsBody"></div>
   </section>
 
+  <!-- 弹出卡片(人物 / 连线 / AI 审核 共用) -->
+  <div id="sheet" class="sheet hidden"></div>
+
 </main>
 
 <nav id="tabbar">
   <button class="navbtn on" data-view="graph"><i>🕸</i><span>图谱</span></button>
-  <button class="navbtn" data-view="people"><i>👤</i><span>查人</span></button>
-  <button class="navbtn" data-view="plan"><i>♟</i><span>谋划</span></button>
-  <button class="navbtn" data-view="input"><i>✎</i><span>录入</span></button>
+  <button class="navbtn" data-view="people"><i>👤</i><span>人物</span></button>
   <button class="navbtn" data-view="settings"><i>⚙</i><span>设置</span></button>
 </nav>
 
 <div id="toast" class="hidden"></div>
+<div id="busy" class="hidden"><div class="box"></div></div>
 
 <script src="/graph.js"></script>
 <script src="/app.js"></script>
