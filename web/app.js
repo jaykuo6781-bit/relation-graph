@@ -395,6 +395,8 @@ function paintLegend() {
     `<span class="k">${g.nodes.length} 人 · ${g.edges.length} 条关系</span><br>` +
     `<span class="k"><i class="sw pos"></i>正向</span>` +
     `<span class="k"><i class="sw neg"></i>负向</span>` +
+    (g.edges.some(e => e.mixed)
+      ? `<span class="k"><i class="sw mix"></i>⚡ 又好又对立</span>` : "") +
     (S.byFaction ? `<span class="k">节点颜色 = 派系</span>`
                  : `<span class="k">节点亮度 = 重要程度</span>`);
 }

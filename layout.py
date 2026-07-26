@@ -244,18 +244,40 @@ def _arc(x1, y1, x2, y2, cap):
     return cx, cy, qx, qy
 
 
-def _edge_display(kinds, w):
-    """决定一条边怎么显示:标签取最强的那个关系,标记符取它的类别。"""
+def _edge_display(kinds, w, mixed=False):
+    """决定一条边怎么显示:标签取最强的那个关系,标记符取它的类别。
+
+    混合关系(既有正向又有负向)单独标出来 —— 它是这张图上信息量最大的
+    一种边:两个人私交很好但利益上是对手。前端据此画成双色。
+    """
     if not kinds:
-        return {"label": "", "cat": "社交", "glyph": "", "count": 0}
+        return {"label": "", "cat": "社交", "glyph": "", "count": 0,
+                "mixed": False}
     dominant = max(kinds, key=lambda k: abs(k.get("strength", 0)))
     cat = dominant.get("cat", "社交")
+    if mixed:
+        # 混合边的标签要同时点出两面,只显示"最强的那个"会误导 ——
+        # 强度相同时(朋友+2 / 竞争-2)取哪个纯属偶然
+        pos_k = max((k for k in kinds if k.get("strength", 0) > 0),
+                    key=lambda k: k["strength"], default=None)
+        neg_k = min((k for k in kinds if k.get("strength", 0) < 0),
+                    key=lambda k: k["strength"], default=None)
+        if pos_k and neg_k:
+            return {
+                "label": f"{pos_k['kind']} / {neg_k['kind']}",
+                "cat": cat,
+                "glyph": "⚡",              # 张力
+                "count": len(kinds),
+                "all_kinds": [k["kind"] for k in kinds],
+                "mixed": True,
+            }
     return {
         "label": dominant["kind"],
         "cat": cat,
         "glyph": db.CATEGORY_GLYPH.get(cat, ""),
         "count": len(kinds),
         "all_kinds": [k["kind"] for k in kinds],
+        "mixed": False,
     }
 
 
@@ -324,13 +346,26 @@ def get_graph_payload(circle_id=None, aspect=None):
 
     curve_cap = CURVE_CAP_RATIO * math.hypot(WIDTH, HEIGHT)
     edges = []
-    for (a, b), w in g["pair_w"].items():
-        if w == 0 or a not in pos or b not in pos:
+    mixed_pairs = g.get("mixed") or set()
+    # 遍历 pair_kinds 而不是 pair_w:综合权重为 0 的混合关系
+    # (朋友+2 且 竞争-2)在 pair_w 里是 0,以前会被整条丢掉,
+    # 于是这两个人在图上看起来毫无关系 —— 而那恰恰是最该被看见的一种关系。
+    for (a, b), kinds in g["pair_kinds"].items():
+        if a not in pos or b not in pos:
             continue
+        w = g["pair_w"].get((a, b), 0)
+        is_mixed = (a, b) in mixed_pairs
+        if w == 0 and not is_mixed:
+            continue                 # 真·中性,没什么可画的
         x1, y1 = pos[a]
         x2, y2 = pos[b]
         cx, cy, qx, qy = _arc(x1, y1, x2, y2, curve_cap)
-        disp = _edge_display(g["pair_kinds"].get((a, b), []), w)
+        disp = _edge_display(kinds, w, is_mixed)
+        pw = g.get("pair_pos", {}).get((a, b), 0)
+        nw = g.get("pair_neg", {}).get((a, b), 0)
+        # 粗细按"这段关系有多重",混合边取两个分量里更强的那个,
+        # 不能用综合权重 —— 那是 0,线会细得看不见
+        mag = max(abs(w), abs(pw), abs(nw))
         edges.append({
             "a": a, "b": b,
             "x1": round(x1, 1), "y1": round(y1, 1),
@@ -338,7 +373,8 @@ def get_graph_payload(circle_id=None, aspect=None):
             "cx": round(cx, 1), "cy": round(cy, 1),   # 贝塞尔控制点
             "mx": round(qx, 1), "my": round(qy, 1),   # 曲线中点(放标记符/标签)
             "w": w,
-            "width": round(0.8 + 0.47 * abs(w), 2),
+            "pw": pw, "nw": nw,                       # 正/负分量,前端画双色用
+            "width": round(0.8 + 0.47 * mag, 2),
             **disp,
         })
 

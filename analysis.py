@@ -31,11 +31,25 @@ def build_graph(circle_id=None):
     一对人之间可能同时存在多种关系(比如既是"上下级"又是"竞争"),
     这里把强度相加再截断到 [-3,3] 作为这条边的综合权重。相加是对的:
     "朋友+2" 叠加 "竞争-1" 得 +1,正好表达"关系不错但有竞争"。
+
+    **但求和有一个致命的边界情况**:正负恰好抵消时综合权重是 0,
+    而 0 权重的边以前会被整条丢掉 —— 于是"朋友+2 且 竞争-2"这两个人
+    在图上没有任何连线,在邻接表里也互不相识,派系聚类、中介中心性、
+    引荐路径全都当他们不认识。
+
+    可这恰恰是办公室政治里信息量最大的一种关系:**私交极好但工作上是对手**。
+    它是结构洞所在,是最该被看见的东西,却成了唯一看不见的东西。
+
+    所以除了 pair_w,这里另外分别累计正向分量和负向分量。综合权重仍然
+    用于排序和强弱比较(那个语义是对的),而"这两人之间到底有没有关系"
+    改由 pair_kinds 是否非空来回答。
     """
     people = {p["id"]: p for p in db.list_people(circle_id)}
     relations = db.list_relations(circle_id)
 
     pair_w = defaultdict(int)      # (min_id, max_id) -> 综合权重
+    pair_pos = defaultdict(int)    # 同上 -> 正向分量之和
+    pair_neg = defaultdict(int)    # 同上 -> 负向分量之和(<=0)
     pair_kinds = defaultdict(list)  # (min_id, max_id) -> [(kind, strength, directed, a, b)]
 
     for r in relations:
@@ -44,6 +58,10 @@ def build_graph(circle_id=None):
             continue
         key = (min(a, b), max(a, b))
         pair_w[key] += r["strength"]
+        if r["strength"] > 0:
+            pair_pos[key] += r["strength"]
+        elif r["strength"] < 0:
+            pair_neg[key] += r["strength"]
         info = db.RELATION_KINDS.get(r["kind"], {})
         pair_kinds[key].append({
             "id": r["id"], "kind": r["kind"], "strength": r["strength"],
@@ -54,27 +72,47 @@ def build_graph(circle_id=None):
 
     for k in list(pair_w):
         pair_w[k] = max(-3, min(3, pair_w[k]))
+    for k in list(pair_pos):
+        pair_pos[k] = min(3, pair_pos[k])
+    for k in list(pair_neg):
+        pair_neg[k] = max(-3, pair_neg[k])
+
+    # 正负都有 = 混合关系(私交好但工作上是对手之类)。这类边综合权重
+    # 可能恰好是 0,但两人显然是"认识且关系复杂",不能当不存在。
+    mixed = {k for k in pair_kinds
+             if pair_pos.get(k, 0) > 0 and pair_neg.get(k, 0) < 0}
 
     # 邻接表
-    adj = defaultdict(dict)        # 全部非零边
-    pos_adj = defaultdict(dict)    # 只有正向边
-    neg_adj = defaultdict(dict)    # 只有负向边
-    for (a, b), w in pair_w.items():
-        if w == 0:
-            continue
-        adj[a][b] = w
-        adj[b][a] = w
-        if w > 0:
-            pos_adj[a][b] = w
-            pos_adj[b][a] = w
-        else:
-            neg_adj[a][b] = w
-            neg_adj[b][a] = w
+    adj = defaultdict(dict)        # 全部有关系的边
+    pos_adj = defaultdict(dict)    # 有正向分量的边
+    neg_adj = defaultdict(dict)    # 有负向分量的边
+    for (a, b) in pair_kinds:
+        w = pair_w.get((a, b), 0)
+        p = pair_pos.get((a, b), 0)
+        n = pair_neg.get((a, b), 0)
+        if w == 0 and (a, b) not in mixed:
+            continue                # 真·中性关系(比如只录了一条 strength=0)
+        # 综合权重为 0 的混合关系,在 adj 里取绝对值更大的那一侧当代表,
+        # 免得最短路等算法拿到 0 权重除零
+        aw = w if w != 0 else (p if p >= -n else n)
+        adj[a][b] = aw
+        adj[b][a] = aw
+        # 关键:混合关系会**同时**进正表和负表 —— 这正是事实。
+        # 以前一条边只能二选一,于是"我们私交很好"这半边信息直接消失。
+        if p > 0:
+            pos_adj[a][b] = p
+            pos_adj[b][a] = p
+        if n < 0:
+            neg_adj[a][b] = n
+            neg_adj[b][a] = n
 
     return {
         "circle_id": circle_id,
         "people": people,
         "pair_w": dict(pair_w),
+        "pair_pos": dict(pair_pos),
+        "pair_neg": dict(pair_neg),
+        "mixed": mixed,
         "pair_kinds": dict(pair_kinds),
         "adj": adj,
         "pos_adj": pos_adj,
@@ -89,6 +127,30 @@ def _w(g, a, b):
 def _name(g, pid):
     p = g["people"].get(pid)
     return p["name"] if p else f"#{pid}"
+
+
+# 引荐链上每多经手一个人的固定摩擦(见 intro_path 的说明)
+HOP_COST = 0.6
+# 逆着有向关系的方向走要付的额外代价
+REVERSE_COST = 1.8
+
+
+def _direction_penalty(g, u, v):
+    """从 u 走到 v 这一跳,是否逆着某条有向关系的方向。
+
+    只看有方向的那些关系(db 里 directed=1 的 7 种)。a_id 那一侧是
+    "师傅 / 提携者 / 上级 / 暗恋者 / 出借方",顺着这个方向托人办事更自然。
+    一对人之间可能有多条关系,只要有任意一条是顺向的,就不算逆行。
+    """
+    kinds = g["pair_kinds"].get((min(u, v), max(u, v)))
+    if not kinds:
+        return 1.0
+    directed = [k for k in kinds if k.get("directed") and k.get("strength", 0) > 0]
+    if not directed:
+        return 1.0
+    if any(k["a_id"] == u for k in directed):
+        return 1.0                  # 有一条是顺着走的
+    return REVERSE_COST
 
 
 # ============================================================
@@ -418,6 +480,17 @@ def intro_path(from_id, to_id, circle_id=None):
 
     只走正向关系,边的代价 = 1/强度 —— 交情越铁,这一跳越"便宜",
     所以算法会优先选强关系链而不是单纯的短链。
+
+    再加两条修正:
+
+    **每跳的固定摩擦。** 只用 1/强度 时,三跳最强关系链(0.333×3=1.0)和
+    一跳最弱关系(1.0)成本完全相同,而现实里每多一个人传话,成功率就要
+    再打一次折。HOP_COST 让"少经手几个人"本身有价值。
+
+    **方向。** 关系表里 7 种关系是有方向的(师徒、提携、上下级、单恋…),
+    db 也一直忠实地存着 a/b 的顺序,但所有算法都把邻接表做成对称的,
+    方向信息录进去了却从没被用过。引荐这件事上方向是实打实的:
+    托师傅去说徒弟的事,和反过来,难度完全不一样。所以逆着方向走要加价。
     """
     g = build_graph(circle_id)
     if from_id not in g["people"] or to_id not in g["people"]:
@@ -440,7 +513,7 @@ def intro_path(from_id, to_id, circle_id=None):
         for v, w in g["pos_adj"].get(u, {}).items():
             if w <= 0:
                 continue
-            nd = d + 1.0 / w
+            nd = d + HOP_COST + (1.0 / w) * _direction_penalty(g, u, v)
             if nd < dist.get(v, math.inf):
                 dist[v] = nd
                 prev[v] = u

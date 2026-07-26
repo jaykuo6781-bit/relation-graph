@@ -710,6 +710,22 @@ const GraphRender = (() => {
     if (style.streak) {
       // 流光连线:两端淡出、中间实 —— 线就有了光带的收束感
       for (const e of payload.edges) {
+        /* 混合关系(既是朋友又是对手)画成一头青一头红 —— 一眼就能看出
+           "这两个人关系很复杂"。这是图上信息量最大的一种边:结构洞所在。
+           正好复用已有的流光渐变机制,零额外成本、不用 filter。 */
+        if (e.mixed) {
+          out.push(
+            `<linearGradient id="${P}e${e.a}_${e.b}" gradientUnits="userSpaceOnUse" ` +
+            `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}">` +
+            `<stop offset="0%"   stop-color="var(--pos)" stop-opacity="0.10"/>` +
+            `<stop offset="26%"  stop-color="var(--pos)" stop-opacity="1"/>` +
+            `<stop offset="50%"  stop-color="var(--pos)" stop-opacity="0.9"/>` +
+            `<stop offset="50%"  stop-color="var(--neg)" stop-opacity="0.9"/>` +
+            `<stop offset="74%"  stop-color="var(--neg)" stop-opacity="1"/>` +
+            `<stop offset="100%" stop-color="var(--neg)" stop-opacity="0.10"/>` +
+            `</linearGradient>`);
+          continue;
+        }
         const v = e.w < 0 ? "--neg" : "--pos";
         out.push(
           `<linearGradient id="${P}e${e.a}_${e.b}" gradientUnits="userSpaceOnUse" ` +
@@ -728,13 +744,17 @@ const GraphRender = (() => {
 
     out.push('<g class="edges">');
     for (const e of payload.edges) {
-      const neg = e.w < 0;
+      const mix = !!e.mixed;
+      const neg = !mix && e.w < 0;
       const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
+      const solid = mix ? "--neg" : (neg ? "--neg" : "--pos");
       const stroke = style.streak
-        ? `url(#${P}e${e.a}_${e.b})` : `var(${neg ? "--neg" : "--pos"})`;
-      const op = neg ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
+        ? `url(#${P}e${e.a}_${e.b})` : `var(${solid})`;
+      // 混合边和负向边一样要压过正向边的视觉权重 —— 它们是"值得看的地方"
+      const op = (neg || mix) ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
+      const cls = mix ? "mix" : (neg ? "neg" : "pos");
       out.push(
-        `<g class="eg ${neg ? "neg" : "pos"}" data-a="${e.a}" data-b="${e.b}">` +
+        `<g class="eg ${cls}" data-a="${e.a}" data-b="${e.b}">` +
         `<path class="edge" d="${d}" stroke="${stroke}" ` +
           `stroke-width="${(e.width * style.edgeW).toFixed(2)}" ` +
           `opacity="${op.toFixed(2)}"${neg ? ' stroke-dasharray="7 6"' : ""}/>` +

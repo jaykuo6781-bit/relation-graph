@@ -219,6 +219,13 @@ button{font-family:inherit;color:inherit}
   opacity:0;transition:opacity .2s ease;
 }
 
+/* 混合关系:既有正向又有负向(私交很好但工作上是对手)。
+   线本身是一头青一头红的渐变,这里只补一点点视觉权重 ——
+   它是图上信息量最大的一种边,不该比普通正向边还弱。
+   注意不给它虚线:虚线在这套语言里已经专指"纯负向"。 */
+.eg.mix .edge{stroke-linecap:butt}
+.eg.mix .elabel{font-weight:600}
+
 /* ---- 星点 ---- */
 .stars circle{fill:#cfe6ff;pointer-events:none}
 :root[data-theme="light"] .stars circle{fill:#9fb6cc}
@@ -312,6 +319,7 @@ button{font-family:inherit;color:inherit}
 /* 图例的颜色必须**就是**图上那条线的颜色。之前正向色块画的是灰色 --text-2,
    而图上的正向边是青色 --pos —— 图例在说明一个不存在的东西。 */
 #legend .sw.pos{background:var(--pos)}
+#legend .sw.mix{background:linear-gradient(90deg,var(--pos) 0 50%,var(--neg) 50% 100%)}
 /* 负向边在图上是虚线(stroke-dasharray),图例也得是虚线,
    用重复渐变画,不额外加元素 */
 #legend .sw.neg{

@@ -185,6 +185,74 @@ def main():
     check("能查到邵一鸣和白宇航之间的故事", len(stories) >= 1,
           f"实际 {len(stories)} 条")
 
+    # ---------------- 混合关系不该消失(v6 修复) ----------------
+    print("\n混合关系(既是朋友又是对手)")
+    mix_c = db.create_circle("_混合测试", "自定义")
+    ja, _ = db.upsert_person("甲测", circle_id=mix_c)
+    jb, _ = db.upsert_person("乙测", circle_id=mix_c)
+    db.upsert_relation(mix_c, ja, jb, "朋友", 2)
+    db.upsert_relation(mix_c, ja, jb, "竞争", -2)
+    gm = analysis.build_graph(mix_c)
+    kk = (min(ja, jb), max(ja, jb))
+
+    check("综合权重确实是 0(正负恰好抵消)", gm["pair_w"][kk] == 0,
+          f"实际 {gm['pair_w'][kk]}")
+    check("被识别为混合关系", kk in gm["mixed"])
+    check("两人在邻接表里是相连的(以前这里断开)",
+          jb in gm["adj"].get(ja, {}),
+          "综合权重为 0 就被丢掉的话,派系/中心性/引荐全都当他们不认识")
+    check("同时进正向表和负向表 —— 这正是事实",
+          jb in gm["pos_adj"].get(ja, {}) and jb in gm["neg_adj"].get(ja, {}))
+    pm = layout.get_graph_payload(mix_c)
+    me_edge = [e for e in pm["edges"] if {e["a"], e["b"]} == {ja, jb}]
+    check("图上真的画出了这条边", len(me_edge) == 1,
+          "以前 w==0 会被 layout 跳过,两个人看起来毫无关系")
+    if me_edge:
+        e = me_edge[0]
+        check("边被标为 mixed 且带 ⚡ 标记符",
+              e.get("mixed") and e.get("glyph") == "⚡",
+              f"实际 mixed={e.get('mixed')} glyph={e.get('glyph')!r}")
+        check("标签同时点出两面,而不是只显示其中一个",
+              "朋友" in e["label"] and "竞争" in e["label"],
+              f"实际 {e['label']!r}")
+        check("线宽按分量算,不会因为综合权重是 0 而细得看不见",
+              e["width"] > 1.0, f"实际 {e['width']}")
+        check("正负分量都送到了前端(画双色用)",
+              e.get("pw") == 2 and e.get("nw") == -2,
+              f"实际 pw={e.get('pw')} nw={e.get('nw')}")
+    db.delete_circle(mix_c)
+    db.delete_person(ja)
+    db.delete_person(jb)
+
+    # ---------------- 引荐路径:跳数摩擦与方向(v6) ----------------
+    print("\n引荐路径:跳数与方向")
+    dir_c = db.create_circle("_方向测试", "自定义")
+    ms, _ = db.upsert_person("师傅测", circle_id=dir_c)
+    td, _ = db.upsert_person("徒弟测", circle_id=dir_c)
+    wr, _ = db.upsert_person("外人测", circle_id=dir_c)
+    db.upsert_relation(dir_c, ms, td, "提携", 2)      # 有向:a=师傅
+    db.upsert_relation(dir_c, td, wr, "朋友", 2)
+    fwd = analysis.intro_path(ms, wr, dir_c)
+    rev = analysis.intro_path(wr, ms, dir_c)
+    check("逆着「提携」的方向引荐更贵(方向以前完全没被用过)",
+          rev["cost"] > fwd["cost"],
+          f"顺向 {fwd['cost']} / 逆向 {rev['cost']}")
+
+    hop_c = db.create_circle("_跳数测试", "自定义")
+    hs = [db.upsert_person(f"P{i}测", circle_id=hop_c)[0] for i in range(5)]
+    for i in range(3):
+        db.upsert_relation(hop_c, hs[i], hs[i + 1], "朋友", 3)
+    db.upsert_relation(hop_c, hs[0], hs[4], "点头之交", 1)
+    long3 = analysis.intro_path(hs[0], hs[3], hop_c)
+    short1 = analysis.intro_path(hs[0], hs[4], hop_c)
+    check("三跳最强链比一跳最弱关系更贵(旧公式下两者都是 1.0,分不出来)",
+          long3["cost"] > short1["cost"],
+          f"三跳 {long3['cost']} / 一跳 {short1['cost']}")
+    for c in (dir_c, hop_c):
+        db.delete_circle(c)
+    for pid in [ms, td, wr] + hs:
+        db.delete_person(pid)
+
     # ---------------- AI 摄取的去重(v6 修复) ----------------
     print("\nAI 摄取:模糊匹配不该造出重复人物")
     import llm
