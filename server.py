@@ -11,6 +11,7 @@ import mimetypes
 import posixpath
 import socketserver
 import sys
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -423,20 +424,57 @@ def main():
     db.connect()
 
     port = config.PORT
-    host = config.detect_bind_host(allow_lan=allow_lan)
     ts_ip = config.detect_tailscale_ip()
     lan_ip = config.detect_lan_ip()
+
+    # 同时监听两个地址:
+    #   127.0.0.1  —— 这台电脑自己用,永远可用
+    #   Tailscale / 局域网地址 —— 手机用
+    # 刻意不绑 0.0.0.0:那会把服务暴露在所有网卡上,包括公司 Wi-Fi。
+    hosts = ["127.0.0.1"]
+    remote = ts_ip or (lan_ip if allow_lan else None)
+    if remote and remote not in hosts:
+        hosts.append(remote)
 
     bar = "=" * 60
     print(bar)
     print("  人际关系图谱  relation-graph")
     print(bar)
-    print(f"  本机访问:  http://127.0.0.1:{port}")
+
+    servers, failed = [], []
+    for h in hosts:
+        try:
+            servers.append((h, Server((h, port), Handler)))
+        except OSError as e:
+            failed.append((h, e))
+
+    if not servers:
+        print("  [启动失败] 没有一个地址能监听:")
+        for h, e in failed:
+            print(f"    {h}:{port}   {e}")
+        print()
+        print("  最常见的原因是端口已被占用 —— 多半是已经有一个本程序在跑了。")
+        print("  查一下是谁占着:")
+        print(f"      netstat -ano | findstr :{port}")
+        print("  或者换个端口启动:")
+        print(f"      set RELGRAPH_PORT=8788  &&  python server.py")
+        print(bar, flush=True)
+        return 1
+
+    print("  可以打开的地址:")
+    for h, _ in servers:
+        if h == "127.0.0.1":
+            note = "  ← 这台电脑上用这个"
+        elif h == ts_ip:
+            note = "  ← 手机上用这个(Tailscale)"
+        else:
+            note = "  ← 手机上用这个(局域网)"
+        print(f"      http://{h}:{port}{note}")
+    for h, e in failed:
+        print(f"      ⚠ {h}:{port} 监听失败 —— {e}")
     print()
 
     if ts_ip:
-        print(f"  手机访问:  http://{ts_ip}:{port}   (Tailscale,推荐)")
-        print()
         print("  手机上怎么用:")
         print("    1. iPhone 装 Tailscale,登录同一个账号")
         print(f"    2. Safari 打开 http://{ts_ip}:{port}")
@@ -445,26 +483,21 @@ def main():
         if sys.platform == "win32":
             print()
             print("  手机打不开?多半是 Windows 防火墙拦了入站连接。")
-            print("  用管理员身份打开 PowerShell,在本目录执行:")
+            print("  用管理员身份打开 PowerShell,在本目录执行一次:")
             print("      .\\setup-firewall.ps1")
     elif allow_lan and lan_ip:
-        print(f"  手机访问:  http://{lan_ip}:{port}   (局域网)")
-        print()
         print("  ⚠ 当前是局域网模式:同一个 Wi-Fi 下的任何人")
         print("    只要知道这个地址就能打开,看到你对同事的全部评价。")
         print("    在公司 Wi-Fi 上千万别开。建议改用 Tailscale:")
         print("    https://tailscale.com/download/windows")
-        print()
-        print("  手机上:同一个 Wi-Fi → Safari 打开上面的地址")
-        print("        → 分享 →「添加到主屏幕」")
     else:
-        print("  目前只有这台电脑能访问。想在手机上用,二选一:")
+        print("  手机现在还连不上。想在手机上用,二选一:")
         print()
         print("  【推荐】装 Tailscale(免费,两分钟)")
         print("    1. 这台电脑装:https://tailscale.com/download/windows")
         print("    2. iPhone 也装,登录同一个账号")
         print("    3. 重新运行本程序,会自动检测到并打印手机用的地址")
-        print("    好处:只有你自己的设备能连,在外面用手机流量也能连。")
+        print("    好处:只有你自己的设备能连,在外面用流量也能连。")
         print()
         print("  【临时】局域网模式:用 run-lan.bat 启动")
         if lan_ip:
@@ -476,14 +509,25 @@ def main():
     print("  按 Ctrl+C 停止")
     print(bar, flush=True)
 
-    httpd = Server((host, port), Handler)
+    threads = []
+    for _, srv in servers:
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        threads.append(t)
 
     try:
-        httpd.serve_forever()
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(0.5)
     except KeyboardInterrupt:
-        print("\n已停止。")
-        httpd.server_close()
+        print("\n正在停止…")
+    finally:
+        for _, srv in servers:
+            srv.shutdown()
+            srv.server_close()
+        print("已停止。")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
