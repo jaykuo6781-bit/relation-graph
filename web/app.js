@@ -10,6 +10,8 @@ const S = {
   people: [],
   circle: null,          // 当前圈子对象
   view: "graph",
+  graph: null,
+  byFaction: false,
   graphLoaded: false,
   files: [],             // AI 输入栏里待发送的附件
 };
@@ -36,6 +38,22 @@ const cq = (extra) => {
   const cid = S.circle ? S.circle.id : "";
   return `circle=${cid}${extra || ""}`;
 };
+
+/* 视口宽高比 —— 服务端据此决定画布是宽的还是竖的。
+   写死正方形画布的后果:宽屏上左右各空一半,竖屏上反过来。 */
+function viewAspect() {
+  const r = $("#stage").getBoundingClientRect();
+  return r.height > 0 ? (r.width / r.height).toFixed(2) : "1";
+}
+
+/* 图要避开的下方遮挡:AI 输入栏 + 底部导航 + 安全区。
+   v2 这里写死了 90,结果下缘的节点被输入框吃掉。 */
+function bottomInset() {
+  const bar = $("#aibar");
+  const h = (bar && !bar.classList.contains("hidden"))
+    ? bar.getBoundingClientRect().height + 24 : 0;
+  return h;
+}
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, c =>
@@ -72,14 +90,32 @@ function avatar(id, name, size) {
     width:${s}px;height:${s}px;font-size:${Math.round(s * 0.4)}px">${esc((name || "?")[0])}</div>`;
 }
 
-function sheetInset() {
-  const sh = document.querySelector(".sheet:not(.hidden)");
-  return sh ? sh.getBoundingClientRect().height : 0;
+/* ---------------- 主题 ---------------- */
+
+// 默认深色 —— 关系图在深底上才成立(发光、景深、弱化背景都只在深色下有意义)
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", t === "light" ? "#f6f6f7" : "#0a0a0c");
+  const b = $("#themeBtn");
+  if (b) b.textContent = t === "light" ? "☾" : "☀";
+}
+
+function initTheme() {
+  applyTheme(localStorage.getItem("theme") || "dark");
+}
+
+function toggleTheme() {
+  const next = document.documentElement.getAttribute("data-theme") === "light"
+    ? "dark" : "light";
+  localStorage.setItem("theme", next);
+  applyTheme(next);
 }
 
 /* ---------------- 启动 ---------------- */
 
 async function boot() {
+  initTheme();
   GraphView.init({
     onNode: showPerson,
     onEdge: showPair,
@@ -106,7 +142,27 @@ async function boot() {
       $("#circleMenu").classList.add("hidden");
   });
 
-  $("#fitBtn").onclick = () => { closeSheets(); GraphView.fit(); };
+  $("#fitBtn").onclick = () => { closeSheets(); GraphView.fit(bottomInset()); };
+  $("#themeBtn").onclick = toggleTheme;
+  $("#facBtn").onclick = () => {
+    S.byFaction = !S.byFaction;
+    localStorage.setItem("byFaction", S.byFaction ? "1" : "");
+    GraphView.setFactionMode(S.byFaction);
+    $("#facBtn").classList.toggle("on", S.byFaction);
+    paintLegend();
+    toast(S.byFaction ? "按派系着色" : "回到灰阶");
+  };
+  S.byFaction = !!localStorage.getItem("byFaction");
+  $("#facBtn").classList.toggle("on", S.byFaction);
+
+  // 窗口尺寸变了可能跨到另一个画布档位,重新取一次
+  let rz;
+  window.addEventListener("resize", () => {
+    clearTimeout(rz);
+    rz = setTimeout(() => {
+      if (S.view === "graph") { S.graphLoaded = false; loadGraph(); }
+    }, 350);
+  });
 
   bindAiBar();
   await refresh();
@@ -212,7 +268,7 @@ async function newCircle() {
 
 async function loadGraph() {
   try {
-    const g = await api("/api/graph?" + cq());
+    const g = await api(`/api/graph?${cq()}&aspect=${viewAspect()}`);
     const empty = $("#graphEmpty");
     if (!g.nodes.length) {
       empty.classList.remove("hidden");
@@ -223,15 +279,25 @@ async function loadGraph() {
     empty.classList.add("hidden");
     $("#legend").classList.remove("hidden");
     GraphView.render(g);
-    requestAnimationFrame(() => GraphView.fit(90));
+    GraphView.setFactionMode(S.byFaction);
+    S.graph = g;
+    requestAnimationFrame(() => GraphView.fit(bottomInset()));
     S.graphLoaded = true;
-    $("#legend").innerHTML =
-      `<b>${g.nodes.length}</b> 人 · <b>${g.edges.length}</b> 条关系<br>` +
-      `实线正向 · <span style="color:var(--neg)">虚线负向</span><br>` +
-      `♥情感 ¥利益 ▪职场 ●社交 ✎学缘 ⌂亲缘`;
+    paintLegend();
   } catch (e) {
     toast(e.message);
   }
+}
+
+function paintLegend() {
+  const g = S.graph;
+  if (!g) return;
+  $("#legend").innerHTML =
+    `<span class="k">${g.nodes.length} 人 · ${g.edges.length} 条关系</span><br>` +
+    `<span class="k"><i class="sw" style="background:var(--text-2);opacity:.35"></i>正向</span>` +
+    `<span class="k"><i class="sw" style="background:var(--neg)"></i>负向</span>` +
+    (S.byFaction ? `<span class="k">节点颜色 = 派系</span>`
+                 : `<span class="k">节点亮度 = 重要程度</span>`);
 }
 
 function closeSheets() {
@@ -614,7 +680,7 @@ function renderPeople() {
     !q || (p.name + p.dept + p.title + p.tags).toLowerCase().includes(q));
   $("#peopleList").innerHTML = list.length
     ? list.map(p => `
-      <div class="row" onclick="switchView('graph');setTimeout(()=>{showPerson(${p.id});GraphView.centerOn(${p.id},260)},60)">
+      <div class="row" onclick="switchView('graph');setTimeout(()=>{showPerson(${p.id});GraphView.centerOn(${p.id},bottomInset()+240)},60)">
         ${avatar(p.id, p.name, 34)}
         <div class="main">
           <div class="nm blurable">${esc(p.name)}${
@@ -699,6 +765,13 @@ function renderSettings() {
       ${st.llm_configured
         ? `已启用 · <span class="mono">${esc(st.llm_model)}</span>`
         : '未配置。设置环境变量 <span class="mono">OPENAI_API_KEY</span> 后重启服务。'}
+    </div></div>
+
+    <div class="sec">外观</div>
+    <div class="card"><div class="hint" style="margin:0">
+      默认深色。顶栏的 ☀/☾ 切换深浅,🎨 在「灰阶」和「按派系着色」之间切换。<br>
+      灰阶模式下颜色只出现在两个地方:「我」和<b style="color:var(--neg)">负向关系</b> ——
+      让矛盾成为画面上唯一跳出来的东西。
     </div></div>
 
     <div class="sec">隐私</div>

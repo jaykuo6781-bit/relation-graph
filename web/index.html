@@ -1,13 +1,19 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no,maximum-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="关系图">
-<meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f2f4f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0a0a0c">
+<script>
+  // 在样式表加载前就把主题定下来,避免打开时闪一下白屏
+  try {
+    document.documentElement.setAttribute(
+      "data-theme", localStorage.getItem("theme") || "dark");
+  } catch (e) {}
+</script>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -19,6 +25,8 @@
 <header id="topbar">
   <button id="circleBtn"></button>
   <div class="spacer"></div>
+  <button id="facBtn" class="icon-btn" title="灰阶 / 按派系着色">◐</button>
+  <button id="themeBtn" class="icon-btn" title="深色 / 浅色">☀</button>
   <button id="fitBtn" class="icon-btn" title="复位">⊹</button>
   <button id="maskBtn" class="icon-btn" title="打码 / 取消打码">🕶</button>
 </header>
@@ -54,16 +62,16 @@
 
   <!-- ================= 人物 ================= -->
   <section class="view hidden" id="view-people">
-    <div class="pad">
+    <div class="pad"><div class="pad-inner">
       <input id="peopleSearch" class="input" placeholder="搜索姓名 / 部门 / 职位"
              autocomplete="off" oninput="renderPeople()">
       <div id="peopleList" class="list" style="margin-top:12px"></div>
-    </div>
+    </div></div>
   </section>
 
   <!-- ================= 设置 ================= -->
   <section class="view hidden" id="view-settings">
-    <div class="pad" id="settingsBody"></div>
+    <div class="pad"><div class="pad-inner" id="settingsBody"></div></div>
   </section>
 
   <!-- 弹出卡片(人物 / 连线 / AI 审核 共用) -->

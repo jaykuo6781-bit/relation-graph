@@ -4,13 +4,15 @@
  * 这里只把它们拼成 SVG,然后平移缩放只改一个 CSS transform,
  * 由 GPU 合成 —— 没有物理循环、没有逐帧计算,所以手机不发热。
  *
- * 视觉编码(三个维度,只有一个占用颜色):
- *   关系正负  → 颜色(蓝↔红发散色板,经色觉障碍校验;不用红/绿)
- *   关系强度  → 线宽
- *   关系类别  → 中点标记符 ♥情感 ¥利益 ▪职场 ●社交 ✎学缘 ⌂亲缘
- *   负向关系  → 额外加虚线(第二重编码,不靠颜色也能分辨)
- *   派系      → 节点填色(分类色板前 3 槽,其余中性灰)
- *   关键人物  → 节点大小(中介中心性)
+ * 视觉编码(深空极简:画面主体是灰阶,颜色只用在该被看见的地方):
+ *   人的重要性 → 节点大小 + 亮度(不是颜色)
+ *   「我」      → 唯一的强调色
+ *   关系正负   → 正向几乎融进背景,**负向才用暖色**并加虚线
+ *                让"矛盾"成为画面上唯一跳出来的东西
+ *   关系强度   → 线宽
+ *   关系类别   → 中点标记符,放大后才浮现,平时不占画面
+ *   派系       → 默认靠**空间聚集**读;顶栏开关切到「派系着色」才上色,
+ *                那时才用经过色觉障碍校验的分类色板
  *
  * 发光效果用 SVG 径向渐变画的同心光晕,**不用 filter**。
  * iOS Safari 上 filter/backdrop-filter 极慢,用它做发光会直接把
@@ -21,10 +23,13 @@
  */
 
 const GraphView = (() => {
+  const ZOOM_REVEAL = 0.92;   // 超过这个缩放级别,全部名字和首字浮现
+
   let stage, canvas, svg;
   let data = null;
   let tx = 0, ty = 0, scale = 1;
   let cb = {};
+  let settleTimer = null;
 
   function init(opts) {
     stage = document.getElementById("stage");
@@ -41,6 +46,20 @@ const GraphView = (() => {
 
   function apply() {
     canvas.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
+    scheduleSettle();
+  }
+
+  /* 缩放稳定后再补偿字号。
+     手势进行中让文字跟着一起缩放是自然的;松手后统一归位。
+     绝不在每一帧改字号 —— 那会让几十个文本节点反复重排,直接发热。
+     这里只写一个 CSS 变量,是 O(1) 的。 */
+  function scheduleSettle() {
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(settle, 90);
+  }
+  function settle() {
+    svg.style.setProperty("--gscale", scale.toFixed(3));
+    svg.classList.toggle("zoomed", scale >= ZOOM_REVEAL);
   }
 
   /* ---------------- 渲染 ---------------- */
@@ -54,13 +73,13 @@ const GraphView = (() => {
 
     const out = [];
 
-    // 光晕用的径向渐变:每个派系配色一个。纯填充,不是滤镜。
     out.push("<defs>");
-    for (let i = 0; i < 4; i++) {
-      const v = i === 3 ? "--f0" : `--f${i + 1}`;
+    // 光晕:纯径向渐变填充,不是滤镜。只给重要节点和「我」,避免画面糊成一片。
+    for (const [id, v] of [["0", "--n-hi"], ["1", "--n-hi"], ["2", "--n-hi"],
+                           ["3", "--n-hi"], ["me", "--accent"]]) {
       out.push(
-        `<radialGradient id="halo${i}">` +
-        `<stop offset="35%" stop-color="var(${v})" stop-opacity="0.55"/>` +
+        `<radialGradient id="halo${id}">` +
+        `<stop offset="30%" stop-color="var(${v})" stop-opacity="0.5"/>` +
         `<stop offset="100%" stop-color="var(${v})" stop-opacity="0"/>` +
         `</radialGradient>`);
     }
@@ -85,14 +104,24 @@ const GraphView = (() => {
     out.push("</g>");
 
     // --- 节点 ---
+    // 亮度分三档:重要的人更亮更大,边缘的人沉下去。用亮度而不是颜色做层级,
+    // 是"深空极简"最核心的一条 —— 颜色留给真正需要被看见的东西。
+    const rs = payload.nodes.map(n => n.r).sort((a, b) => b - a);
+    const hiCut = rs[Math.floor(rs.length * 0.22)] ?? 0;
+    const midCut = rs[Math.floor(rs.length * 0.62)] ?? 0;
+
     out.push('<g id="nodes">');
     for (const n of payload.nodes) {
-      const slot = n.frank < 3 ? n.frank : 3;      // 前三大派系上色,其余灰
-      const cls = "node f" + (slot === 3 ? "0" : slot + 1) + (n.is_me ? " me" : "");
+      const slot = n.frank < 3 ? n.frank : 3;      // 派系着色模式才用得上
+      const tier = n.r >= hiCut ? "t-hi" : (n.r >= midCut ? "t-mid" : "t-lo");
+      const cls = "node " + tier + " f" + (slot === 3 ? "0" : slot + 1) +
+                  (n.is_me ? " me" : "") + (n.key ? " key" : "");
       out.push(
         `<g class="${cls}" data-id="${n.id}">` +
-        `<circle class="halo" cx="${n.x}" cy="${n.y}" r="${(n.r * 2.9).toFixed(1)}" ` +
-        `fill="url(#halo${slot})"/>` +
+        (tier === "t-hi" || n.is_me
+          ? `<circle class="halo" cx="${n.x}" cy="${n.y}" ` +
+            `r="${(n.r * 3.1).toFixed(1)}" fill="url(#halo${n.is_me ? "me" : slot})"/>`
+          : "") +
         (n.is_me
           ? `<circle class="ring" cx="${n.x}" cy="${n.y}" r="${(n.r + 5).toFixed(1)}"/>`
           : "") +
@@ -167,17 +196,19 @@ const GraphView = (() => {
   function fit(bottomInset) {
     if (!data || !data.nodes.length) return;
     const xs = data.nodes.map(n => n.x), ys = data.nodes.map(n => n.y);
-    const pad = 70;
+    const pad = 60;
     const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
     const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
     const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
     const r = stage.getBoundingClientRect();
     const inset = bottomInset || 0;
     const availH = Math.max(120, r.height - inset);
-    scale = Math.max(0.15, Math.min(2.6, Math.min(r.width / w, availH / h)));
+    // 上限 1.15:贴合后不要放得比 1:1 大太多,免得节点显得笨重
+    scale = Math.max(0.28, Math.min(1.15, Math.min(r.width / w, availH / h)));
     tx = (r.width - w * scale) / 2 - minX * scale;
     ty = (availH - h * scale) / 2 - minY * scale;
     apply();
+    settle();
   }
 
   function centerOn(pid, bottomInset) {
@@ -275,13 +306,29 @@ const GraphView = (() => {
     }, { passive: false });
   }
 
-  /* 给卡片里的头像用,保证跟图上颜色一致 */
-  function nodeColor(id) {
-    if (!data) return "var(--f0)";
-    const n = data.nodes.find(x => x.id === id);
-    if (!n) return "var(--f0)";
-    return n.frank < 3 ? `var(--f${n.frank + 1})` : "var(--f0)";
+  /* 派系着色开关 */
+  function setFactionMode(on) {
+    svg.classList.toggle("by-faction", !!on);
   }
 
-  return { init, render, fit, focus, focusEdge, centerOn, nodeColor };
+  /* 给卡片里的头像用,保证跟图上一致 */
+  function nodeColor(id) {
+    if (!data) return "var(--n-mid)";
+    const n = data.nodes.find(x => x.id === id);
+    if (!n) return "var(--n-mid)";
+    if (n.is_me) return "var(--accent)";
+    if (svg.classList.contains("by-faction")) {
+      return n.frank < 3 ? `var(--f${n.frank + 1})` : "var(--f0)";
+    }
+    const rs = data.nodes.map(x => x.r).sort((a, b) => b - a);
+    const hiCut = rs[Math.floor(rs.length * 0.22)] ?? 0;
+    const midCut = rs[Math.floor(rs.length * 0.62)] ?? 0;
+    return n.r >= hiCut ? "var(--n-hi)"
+         : (n.r >= midCut ? "var(--n-mid)" : "var(--n-lo)");
+  }
+
+  function currentScale() { return scale; }
+
+  return { init, render, fit, focus, focusEdge, centerOn, nodeColor,
+           setFactionMode, currentScale };
 })();

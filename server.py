@@ -250,8 +250,14 @@ def api_pair_story(handler, query, body):
 
 @route("GET", "/api/graph")
 def api_graph(handler, query, body):
+    """aspect = 视口宽/高。服务端按档位取整后决定画布形状 ——
+    宽屏用宽画布、竖屏用竖画布,不再一律正方形导致两边大片空白。"""
     t0 = time.time()
-    payload = layout.get_graph_payload(_cid(query))
+    try:
+        aspect = float(query.get("aspect", [0])[0])
+    except (TypeError, ValueError):
+        aspect = 0
+    payload = layout.get_graph_payload(_cid(query), aspect)
     payload["compute_ms"] = round((time.time() - t0) * 1000, 1)
     return payload
 

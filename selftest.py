@@ -205,8 +205,12 @@ def main():
           any(e["w"] < 0 and "情敌" in (e.get("all_kinds") or [])
               for e in p_class["edges"]))
 
-    cached = db.cache_get(f"graph_payload_{company['id']}")
+    # 缓存键现在带画布档位 —— 不同屏幕比例各存一份,互不覆盖
+    cached = db.cache_get(f"graph_payload_{company['id']}_square")
     check("布局结果进了缓存(第二次不再重算)", cached is not None)
+    check("不同画布档位各自缓存",
+          db.cache_get(f"graph_payload_{company['id']}_wide") is None,
+          "宽屏档位不该被方形档位的结果污染")
 
     # ---------------- 结果 ----------------
     print("\n" + "=" * 54)

@@ -21,23 +21,49 @@ from collections import defaultdict
 import analysis
 import db
 
-WIDTH = 1000.0
-HEIGHT = 1000.0
-
 FULL_ITERATIONS = 300      # 冷启动(没有历史坐标)
 WARM_ITERATIONS = 80       # 增量(有历史坐标,只需微调)
 
-# 弧线弯曲程度:控制点偏离弦中点的距离占弦长的比例。
-# 这一点点弧度是"知识图谱观感"和"流程示意图观感"的分界线。
-CURVE = 0.14
+# ---- 画布尺寸按屏幕比例自适应 ----
+# 写死正方形画布的后果:宽屏上按高度贴合,左右浪费一半;竖屏上反过来。
+# 这里按几个固定档位取整再算布局 —— 取整是为了让缓存仍然有效,
+# 不能每拖一下窗口就重算一遍布局。
+ASPECT_BUCKETS = {
+    "portrait": (760.0, 1180.0),   # 手机竖屏
+    "square":   (1000.0, 1000.0),  # 方形 / 平板
+    "wide":     (1500.0, 900.0),   # 桌面宽屏
+}
+DEFAULT_BUCKET = "square"
+
+# ---- 弧度 ----
+# 弧度必须封顶。按弦长的固定比例给,长边会被拉成横跨全屏的巨大弓形 ——
+# 画面立刻变成一团意面,这是 v2 最毁观感的一条。
+# 短边保留优雅的小弧,长边几乎拉直,才是成熟图谱工具的做法。
+CURVE = 0.10                # 弦长比例
+CURVE_CAP_RATIO = 0.034     # 上限 = 画布对角线 × 这个比例
 
 
-def _seed_key(circle_id):
-    return f"layout_seed_{circle_id or 'all'}"
+def bucket_of(aspect):
+    """把屏幕宽高比归到档位。aspect = 宽 / 高。"""
+    if not aspect or aspect <= 0:
+        return DEFAULT_BUCKET
+    if aspect < 0.85:
+        return "portrait"
+    if aspect > 1.35:
+        return "wide"
+    return "square"
 
 
-def _load_seed(circle_id):
-    raw = db.get_meta(_seed_key(circle_id))
+def canvas_of(bucket):
+    return ASPECT_BUCKETS.get(bucket, ASPECT_BUCKETS[DEFAULT_BUCKET])
+
+
+def _seed_key(circle_id, bucket):
+    return f"layout_seed_{circle_id or 'all'}_{bucket}"
+
+
+def _load_seed(circle_id, bucket):
+    raw = db.get_meta(_seed_key(circle_id, bucket))
     if not raw:
         return {}
     try:
@@ -46,27 +72,29 @@ def _load_seed(circle_id):
         return {}
 
 
-def _save_seed(circle_id, pos):
+def _save_seed(circle_id, bucket, pos):
     db.connect()
     with db.tx():
-        db.set_meta(_seed_key(circle_id), json.dumps(
+        db.set_meta(_seed_key(circle_id, bucket), json.dumps(
             {str(k): [round(v[0], 2), round(v[1], 2)] for k, v in pos.items()}))
 
 
-def compute(nodes, pos_adj, neg_adj, factions, circle_id=None):
+def compute(nodes, pos_adj, neg_adj, factions, circle_id=None,
+            bucket=DEFAULT_BUCKET):
     """Fruchterman-Reingold 变体。
 
     在标准算法基础上加了两条针对"人际关系图"的规则:
       - 负向边额外产生斥力 —— 有矛盾的人在图上应该离得远
       - 同派系的人有轻微的额外引力 —— 圈子在视觉上抱团
     """
+    WIDTH, HEIGHT = canvas_of(bucket)
     n = len(nodes)
     if n == 0:
         return {}
     if n == 1:
         return {nodes[0]: (WIDTH / 2, HEIGHT / 2)}
 
-    seed = _load_seed(circle_id)
+    seed = _load_seed(circle_id, bucket)
     # 固定随机种子:同一份数据每次算出来的图是一样的,不会随机跳动
     rng = random.Random(20260101)
 
@@ -165,18 +193,20 @@ def compute(nodes, pos_adj, neg_adj, factions, circle_id=None):
     return {v: (pos[v][0], pos[v][1]) for v in nodes}
 
 
-def _arc(x1, y1, x2, y2):
+def _arc(x1, y1, x2, y2, cap):
     """算出一条弧线的控制点,以及曲线中点(标签和标记符落在这里)。
 
     弯曲方向由端点坐标唯一决定,所以同一条边每次渲染都朝同一边弯,
     不会闪来闪去。
+
+    cap 是弧高上限 —— 没有它的话,横跨画布的长边会被拉成巨大的弓形。
     """
     dx, dy = x2 - x1, y2 - y1
     length = math.hypot(dx, dy) or 1.0
     mx, my = (x1 + x2) / 2, (y1 + y2) / 2
     # 垂直于弦的单位向量
     px, py = -dy / length, dx / length
-    off = CURVE * length
+    off = min(CURVE * length, cap)
     cx, cy = mx + px * off, my + py * off
     # 二次贝塞尔在 t=0.5 处的点
     qx = 0.25 * x1 + 0.5 * cx + 0.25 * x2
@@ -199,12 +229,14 @@ def _edge_display(kinds, w):
     }
 
 
-def get_graph_payload(circle_id=None):
-    """图谱视图要的全部数据 —— 坐标、弧线、颜色、粗细都已算好。
+def get_graph_payload(circle_id=None, aspect=None):
+    """图谱视图要的全部数据 —— 坐标、弧线、粗细都已算好。
 
     手机端拿到后直接画,不做任何计算。
     """
-    cache_key = f"graph_payload_{circle_id or 'all'}"
+    bucket = bucket_of(aspect)
+    WIDTH, HEIGHT = canvas_of(bucket)
+    cache_key = f"graph_payload_{circle_id or 'all'}_{bucket}"
     cached = db.cache_get(cache_key)
     if cached is not None:
         return cached
@@ -220,9 +252,10 @@ def get_graph_payload(circle_id=None):
     bt = analysis._brandes(nodes_ids, g["pos_adj"]) if nodes_ids else {}
     mx_bt = max(bt.values()) if bt else 0
 
-    pos = compute(nodes_ids, g["pos_adj"], g["neg_adj"], faction_of, circle_id)
+    pos = compute(nodes_ids, g["pos_adj"], g["neg_adj"], faction_of,
+                  circle_id, bucket)
     if pos:
-        _save_seed(circle_id, pos)
+        _save_seed(circle_id, bucket, pos)
 
     # 圈子大小排名 —— 前 3 大的圈子拿到分类色,其余归中性灰
     fsize = defaultdict(int)
@@ -248,18 +281,19 @@ def get_graph_payload(circle_id=None):
             "y": round(y, 1),
             "faction": faction_of.get(pid, 0),
             "frank": frank.get(faction_of.get(pid, 0), 99),
-            "r": round(13 + 13 * importance, 1),
+            "r": round(14 + 18 * importance, 1),
             "friends": len(g["pos_adj"].get(pid, {})),
             "enemies": len(g["neg_adj"].get(pid, {})),
         })
 
+    curve_cap = CURVE_CAP_RATIO * math.hypot(WIDTH, HEIGHT)
     edges = []
     for (a, b), w in g["pair_w"].items():
         if w == 0 or a not in pos or b not in pos:
             continue
         x1, y1 = pos[a]
         x2, y2 = pos[b]
-        cx, cy, qx, qy = _arc(x1, y1, x2, y2)
+        cx, cy, qx, qy = _arc(x1, y1, x2, y2, curve_cap)
         disp = _edge_display(g["pair_kinds"].get((a, b), []), w)
         edges.append({
             "a": a, "b": b,
@@ -268,13 +302,24 @@ def get_graph_payload(circle_id=None):
             "cx": round(cx, 1), "cy": round(cy, 1),   # 贝塞尔控制点
             "mx": round(qx, 1), "my": round(qy, 1),   # 曲线中点(放标记符/标签)
             "w": w,
-            "width": round(1.2 + 1.3 * abs(w), 1),
+            "width": round(0.8 + 0.47 * abs(w), 2),
             **disp,
         })
+
+    # 关键人物默认才标名字 —— 名字全开在人一多时会糊成一片。
+    # 阈值取"重要性排进前 30% 或本身连接很多"的人。
+    if nodes:
+        ranked = sorted(nodes, key=lambda n: -n["r"])
+        keep = max(3, round(len(ranked) * 0.3))
+        key_ids = {n["id"] for n in ranked[:keep]}
+        for n in nodes:
+            n["key"] = bool(n["is_me"] or n["id"] in key_ids
+                            or n["friends"] + n["enemies"] >= 5)
 
     circle = db.get_circle(circle_id) if circle_id else None
     payload = {
         "circle": circle,
+        "bucket": bucket,
         "width": WIDTH, "height": HEIGHT,
         "nodes": nodes, "edges": edges,
         "faction_count": len(fac["factions"]),
