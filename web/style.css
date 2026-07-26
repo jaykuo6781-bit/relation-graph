@@ -20,38 +20,35 @@
 :root{
   color-scheme: dark;
 
-  --bg-0:#0a0a0c;
-  --bg-1:#111114;
-  --bg-2:#17181c;
-  --bg-3:#1e1f25;
-  --stage-in:#131418;
-  --stage-out:#08080a;
-  --line:#232429;
-  --line-soft:#1a1b1f;
+  --bg-0:#080c18;
+  --bg-1:#0e1424;
+  --bg-2:#141b2e;
+  --bg-3:#1b2439;
+  --stage-in:#0d1830;
+  --stage-out:#050810;
+  --line:#222c44;
+  --line-soft:#182031;
 
   --text:#f2f3f5;
   --text-2:#9ba0aa;
   --dim:#676c77;
 
-  --accent:#6470e8;          /* 唯一的强调色 */
-
-  /* 灰阶节点:用亮度分层级 */
-  --n-hi:#e8eaef;
-  --n-mid:#a8adb8;
-  --n-lo:#6c717c;
-  --node-ink:#0a0a0c;
+  /* 球体色。每组三段:亮(高光侧)/ 本色 / 暗(背光侧),
+     三段一起构成球的体积感。本色经 dataviz 校验。 */
+  --sph:#0fa3b1;  --sph-lt:#5fdfe8;  --sph-dk:#064a55;
+  --me:#6b78f0;   --me-lt:#aeb6fb;   --me-dk:#2f3796;
+  --accent:#6b78f0;
 
   /* 派系着色模式才用(经 dataviz 校验) */
-  --f1:#3987e5;  --f2:#d95926;  --f3:#199e70;  --f0:#767d8c;
+  --f1:#3987e5;  --f1-lt:#8cc2f5;  --f1-dk:#144a86;
+  --f2:#d95926;  --f2-lt:#f2a077;  --f2-dk:#7a2c0d;
+  --f3:#199e70;  --f3-lt:#6ddcb4;  --f3-dk:#0a4a33;
 
-  /* 连线:正向几乎融进背景,只提供结构感;负向才是主角 */
-  --edge:#ffffff;
-  --edge-op:0.11;
-  --neg:#e66767;
-  --edge-neg-op:0.62;
+  --pos:#7fd6e6;           /* 正向连线 */
+  --neg:#e66767;           /* 负向连线 */
+  --node-ink:#ffffff;
 
   --warn:#e3b341;
-  --halo:0.16;
 
   --shadow:0 -16px 44px rgba(0,0,0,.62);
   --safe-b:env(safe-area-inset-bottom,0px);
@@ -60,35 +57,32 @@
 
 :root[data-theme="light"]{
   color-scheme: light;
-  --bg-0:#f6f6f7;
+  --bg-0:#f4f6f8;
   --bg-1:#ffffff;
-  --bg-2:#fafafb;
-  --bg-3:#f0f0f2;
+  --bg-2:#f8fafb;
+  --bg-3:#eef1f4;
   --stage-in:#ffffff;
-  --stage-out:#eeeef1;
-  --line:#e4e4e8;
-  --line-soft:#eeeef1;
+  --stage-out:#e8edf2;
+  --line:#dfe4ea;
+  --line-soft:#edf0f3;
 
   --text:#141519;
   --text-2:#565b66;
   --dim:#878c96;
 
+  --sph:#068d9d;  --sph-lt:#4fc9d6;  --sph-dk:#034551;
+  --me:#4b56cf;   --me-lt:#8f97ea;   --me-dk:#242b7d;
   --accent:#4b56cf;
 
-  --n-hi:#31343c;
-  --n-mid:#767b87;
-  --n-lo:#adb2bc;
+  --f1:#2a78d6;  --f1-lt:#7ab3ef;  --f1-dk:#11447f;
+  --f2:#eb6834;  --f2-lt:#f5a480;  --f2-dk:#8c3410;
+  --f3:#1baf7a;  --f3-lt:#67dbb2;  --f3-dk:#0b5539;
+
+  --pos:#5aa9bb;
+  --neg:#d8442f;
   --node-ink:#ffffff;
 
-  --f1:#2a78d6;  --f2:#eb6834;  --f3:#1baf7a;  --f0:#8b909c;
-
-  --edge:#101319;
-  --edge-op:0.14;
-  --neg:#d8442f;
-  --edge-neg-op:0.68;
-
   --warn:#8a6704;
-  --halo:0.10;
 
   --shadow:0 -14px 38px rgba(20,25,45,.13);
 }
@@ -163,10 +157,25 @@ button{font-family:inherit;color:inherit}
 
 #stage{
   flex:1;position:relative;overflow:hidden;
+  /* 深蓝夜空 + 极光:三层径向渐变叠出色彩层次和景深。
+     纯 CSS 渐变,不是图片也不是滤镜,零开销。 */
   background:
-    radial-gradient(ellipse 90% 70% at 50% 44%,
-      var(--stage-in) 0%, var(--stage-out) 76%);
+    radial-gradient(ellipse 62% 46% at 28% 30%,
+      rgba(24,120,150,.20) 0%, transparent 62%),
+    radial-gradient(ellipse 54% 42% at 76% 68%,
+      rgba(88,72,190,.18) 0%, transparent 60%),
+    radial-gradient(ellipse 96% 78% at 50% 46%,
+      var(--stage-in) 0%, var(--stage-out) 78%);
   touch-action:none;
+}
+:root[data-theme="light"] #stage{
+  background:
+    radial-gradient(ellipse 62% 46% at 28% 30%,
+      rgba(20,150,175,.07) 0%, transparent 62%),
+    radial-gradient(ellipse 54% 42% at 76% 68%,
+      rgba(90,80,190,.06) 0%, transparent 60%),
+    radial-gradient(ellipse 96% 78% at 50% 46%,
+      var(--stage-in) 0%, var(--stage-out) 78%);
 }
 #canvas{
   position:absolute;top:0;left:0;
@@ -174,80 +183,55 @@ button{font-family:inherit;color:inherit}
 }
 #svg{display:block;--gscale:1}
 
-/* 连线 —— 正向几乎融进背景 */
+/* ---- 连线:流光带 ----
+   stroke 由 JS 写成渐变 url(),两端淡出、中间实,线就有了光带的收束感。 */
 .edge{fill:none;stroke-linecap:round;transition:opacity .2s ease}
-.edge.pos{stroke:var(--edge);opacity:var(--edge-op)}
-.edge.neg{stroke:var(--neg);opacity:var(--edge-neg-op)}
 /* 透明描边在默认的 visiblePainted 下不接收事件,必须显式声明 */
 .edge-hit{fill:none;stroke:transparent;stroke-width:26;
   pointer-events:stroke;cursor:pointer}
-
-.eglyph{
-  text-anchor:middle;dominant-baseline:central;pointer-events:none;
-  font-size:calc(11px / var(--gscale));
-  opacity:0;transition:opacity .2s ease;
-}
-.eglyph.pos{fill:var(--text-2)}
-.eglyph.neg{fill:var(--neg)}
 .elabel{
   text-anchor:middle;fill:var(--text);pointer-events:none;
   font-size:calc(11.5px / var(--gscale));
   paint-order:stroke;stroke:var(--stage-in);
-  stroke-width:calc(4px / var(--gscale));stroke-linejoin:round;
+  stroke-width:calc(4.5px / var(--gscale));stroke-linejoin:round;
   opacity:0;transition:opacity .2s ease;
 }
-/* 放大之后才显示类别标记符,平时保持画面干净 */
-#svg.zoomed .eglyph{opacity:.5}
 
-/* 节点 —— 灰阶,用亮度分层级 */
+/* ---- 星点 ---- */
+.stars circle{fill:#cfe6ff;pointer-events:none}
+:root[data-theme="light"] .stars circle{fill:#9fb6cc}
+
+/* ---- 节点:发光的立体球 ----
+   球身、亮边、高光三层叠出体积感;外面套一圈同色光晕。全是渐变填充,
+   没有一处用 filter。 */
 .node{cursor:pointer}
-.node .halo{pointer-events:none;opacity:var(--halo)}
-.node .disc{stroke:var(--stage-out);stroke-width:1.5}
-.node.t-hi  .disc{fill:var(--n-hi)}
-.node.t-mid .disc{fill:var(--n-mid)}
-.node.t-lo  .disc{fill:var(--n-lo)}
-.node.me    .disc{fill:var(--accent);stroke:var(--text);stroke-width:1.8}
-.node.me .ring{fill:none;stroke:var(--accent);stroke-width:1.2;opacity:.55}
-
-/* 派系着色模式:换成经过校验的分类色板 */
-#svg.by-faction .node.f1 .disc{fill:var(--f1)}
-#svg.by-faction .node.f2 .disc{fill:var(--f2)}
-#svg.by-faction .node.f3 .disc{fill:var(--f3)}
-#svg.by-faction .node.f0 .disc{fill:var(--f0)}
-#svg.by-faction .node.me .disc{fill:var(--accent)}
+.node .glow,.node .spec,.node .rim{pointer-events:none}
+.node .rim{fill:none;stroke:#fff;stroke-opacity:.30;stroke-width:1.1}
+.node .spec{fill:#fff;opacity:.30;pointer-events:none}
+.node.me .rim{stroke-opacity:.62;stroke-width:1.6}
 
 .node .ini{
   text-anchor:middle;dominant-baseline:central;pointer-events:none;
-  fill:var(--node-ink);font-weight:650;font-size:15px;
-  opacity:0;transition:opacity .2s ease;
+  fill:var(--node-ink);font-weight:600;letter-spacing:.5px;
 }
-#svg.zoomed .node .ini{opacity:1}
-.node.me .ini{fill:#fff}
-
 .node .nm{
-  text-anchor:middle;fill:var(--text-2);pointer-events:none;
-  font-size:calc(12px / var(--gscale));letter-spacing:.3px;
+  text-anchor:middle;fill:var(--text);pointer-events:none;
+  letter-spacing:.4px;
   paint-order:stroke;stroke:var(--stage-out);
   stroke-width:calc(3.5px / var(--gscale));stroke-linejoin:round;
-  opacity:0;transition:opacity .2s ease;
 }
-/* 默认只给关键人物标名字;放大之后全部浮现 */
-.node.key .nm{opacity:1;fill:var(--text)}
-#svg.zoomed .node .nm{opacity:1}
+:root[data-theme="light"] .node .nm{stroke:#fff;stroke-width:calc(4px / var(--gscale))}
 
-/* 选中态:其余深深淡出,目标和邻居全亮 */
-#svg.focused .node{opacity:.13;transition:opacity .2s ease}
-#svg.focused .edge{opacity:.045 !important}
-#svg.focused .eglyph{opacity:0}
+/* 选中态:其余深深淡出,目标和邻居全亮,连线上浮出关系文字 */
+#svg.focused .node{opacity:.14;transition:opacity .2s ease}
+#svg.focused .eg{opacity:.07;transition:opacity .2s ease}
 #svg.focused .node.near{opacity:1}
-#svg.focused .node.near .nm{opacity:1}
-#svg.focused .edge.near{opacity:.9 !important}
-#svg.focused .eglyph.near{opacity:.9}
-#svg.focused .elabel.near{opacity:1}
-.node.sel .disc{stroke:var(--text);stroke-width:2.4}
+#svg.focused .eg.near{opacity:1}
+#svg.focused .eg.near .elabel{opacity:1}
+.node.sel .rim{stroke-opacity:.95;stroke-width:2.2}
 
 @media (prefers-reduced-motion: reduce){
-  .edge,.elabel,.eglyph,.node .nm,.node .ini,#svg.focused .node{transition:none}
+  .edge,.elabel,#svg.focused .node,#svg.focused .eg{transition:none}
 }
 
 .empty{

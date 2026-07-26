@@ -35,12 +35,24 @@ ASPECT_BUCKETS = {
 }
 DEFAULT_BUCKET = "square"
 
+# 画布按人数缩放的基准人数。
+# 之前画布尺寸写死,理想边长 k = √(画布面积/人数) 就会随人数剧烈变化:
+# 19 个人配 1500×900 算出 k≈266,而画布才 1500 宽 —— 所有节点被斥力
+# 顶到四壁,中间空出一个大洞。让画布随 √人数 缩放,每个节点分到的面积
+# 就恒定了,19 人和 100 人的疏密观感一致。
+BASE_NODES = 20.0
+MIN_CANVAS_SCALE = 0.55
+MAX_CANVAS_SCALE = 2.6
+
 # ---- 弧度 ----
 # 弧度必须封顶。按弦长的固定比例给,长边会被拉成横跨全屏的巨大弓形 ——
 # 画面立刻变成一团意面,这是 v2 最毁观感的一条。
 # 短边保留优雅的小弧,长边几乎拉直,才是成熟图谱工具的做法。
 CURVE = 0.10                # 弦长比例
 CURVE_CAP_RATIO = 0.034     # 上限 = 画布对角线 × 这个比例
+
+# 向心力强度。太小治不住"全贴四壁",太大会把图挤成一坨。
+GRAVITY = 0.055
 
 
 def bucket_of(aspect):
@@ -54,8 +66,17 @@ def bucket_of(aspect):
     return "square"
 
 
-def canvas_of(bucket):
-    return ASPECT_BUCKETS.get(bucket, ASPECT_BUCKETS[DEFAULT_BUCKET])
+def canvas_of(bucket, n_nodes=None):
+    """档位决定画布形状,人数决定画布大小。
+
+    人数不给就用基准尺寸(向后兼容旧调用)。
+    """
+    w, h = ASPECT_BUCKETS.get(bucket, ASPECT_BUCKETS[DEFAULT_BUCKET])
+    if not n_nodes:
+        return w, h
+    k = math.sqrt(max(1, n_nodes) / BASE_NODES)
+    k = max(MIN_CANVAS_SCALE, min(MAX_CANVAS_SCALE, k))
+    return w * k, h * k
 
 
 def _seed_key(circle_id, bucket):
@@ -87,8 +108,8 @@ def compute(nodes, pos_adj, neg_adj, factions, circle_id=None,
       - 负向边额外产生斥力 —— 有矛盾的人在图上应该离得远
       - 同派系的人有轻微的额外引力 —— 圈子在视觉上抱团
     """
-    WIDTH, HEIGHT = canvas_of(bucket)
     n = len(nodes)
+    WIDTH, HEIGHT = canvas_of(bucket, n)
     if n == 0:
         return {}
     if n == 1:
@@ -157,6 +178,15 @@ def compute(nodes, pos_adj, neg_adj, factions, circle_id=None,
                 fx, fy = force * dx / d, force * dy / d
                 disp[v][0] -= fx; disp[v][1] -= fy
                 disp[u][0] += fx; disp[u][1] += fy
+
+        # --- 向心力 ---
+        # Fruchterman-Reingold 原版只有斥力和引力,没有任何把节点拉回来的力,
+        # 结果所有点一路往外飘直到撞上边界钳制 —— 表现就是"全贴在四壁上,
+        # 中间空一个大洞"。加一个弱重力把整张图收拢回画布中心。
+        cx0, cy0 = WIDTH / 2, HEIGHT / 2
+        for v in nodes:
+            disp[v][0] -= (pos[v][0] - cx0) * GRAVITY
+            disp[v][1] -= (pos[v][1] - cy0) * GRAVITY
 
         # --- 同派系的轻微抱团 ---
         if factions:
@@ -235,7 +265,6 @@ def get_graph_payload(circle_id=None, aspect=None):
     手机端拿到后直接画,不做任何计算。
     """
     bucket = bucket_of(aspect)
-    WIDTH, HEIGHT = canvas_of(bucket)
     cache_key = f"graph_payload_{circle_id or 'all'}_{bucket}"
     cached = db.cache_get(cache_key)
     if cached is not None:
@@ -244,6 +273,7 @@ def get_graph_payload(circle_id=None, aspect=None):
     g = analysis.build_graph(circle_id)
     people = g["people"]
     nodes_ids = sorted(people.keys())
+    WIDTH, HEIGHT = canvas_of(bucket, len(nodes_ids))
 
     fac = analysis.detect_factions(circle_id)
     faction_of = {int(k): v for k, v in fac["assignment"].items()}
@@ -264,6 +294,12 @@ def get_graph_payload(circle_id=None, aspect=None):
     frank = {fid: i for i, (fid, _) in enumerate(
         sorted(fsize.items(), key=lambda kv: (-kv[1], kv[0])))}
 
+    # 人多时球体和光晕都要收敛 —— 参考图只有 4 个球,100 个大球会糊成光晕粥
+    n_all = max(1, len(nodes_ids))
+    shrink = max(0.62, min(1.0, math.sqrt(24.0 / n_all)))
+    node_base = 17.0 * shrink
+    node_span = 16.0 * shrink
+
     nodes = []
     for pid in nodes_ids:
         p = people[pid]
@@ -281,7 +317,7 @@ def get_graph_payload(circle_id=None, aspect=None):
             "y": round(y, 1),
             "faction": faction_of.get(pid, 0),
             "frank": frank.get(faction_of.get(pid, 0), 99),
-            "r": round(14 + 18 * importance, 1),
+            "r": round(node_base + node_span * importance, 1),
             "friends": len(g["pos_adj"].get(pid, {})),
             "enemies": len(g["neg_adj"].get(pid, {})),
         })
@@ -320,6 +356,7 @@ def get_graph_payload(circle_id=None, aspect=None):
     payload = {
         "circle": circle,
         "bucket": bucket,
+        "density": round(shrink, 3),   # 前端据此收敛光晕/星点强度
         "width": WIDTH, "height": HEIGHT,
         "nodes": nodes, "edges": edges,
         "faction_count": len(fac["factions"]),

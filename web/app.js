@@ -116,6 +116,8 @@ function toggleTheme() {
 
 async function boot() {
   initTheme();
+  // 视觉强度档位。对比页定稿后把默认值改成用户选的那一档。
+  GraphView.setStyle(GraphStyles[localStorage.getItem("gstyle") || "B"]);
   GraphView.init({
     onNode: showPerson,
     onEdge: showPair,

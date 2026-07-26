@@ -1,35 +1,40 @@
 /* 图谱渲染 —— 手机端只做"画",不做任何计算。
  *
- * 坐标、弧线控制点、标签落点、类别标记符,全部由服务端算好送过来。
- * 这里只把它们拼成 SVG,然后平移缩放只改一个 CSS transform,
- * 由 GPU 合成 —— 没有物理循环、没有逐帧计算,所以手机不发热。
+ * 坐标、弧线控制点、标签落点全部由服务端算好送过来。这里只把它们拼成 SVG,
+ * 平移缩放只改一个 CSS transform 由 GPU 合成 —— 没有物理循环、没有逐帧计算。
  *
- * 视觉编码(深空极简:画面主体是灰阶,颜色只用在该被看见的地方):
- *   人的重要性 → 节点大小 + 亮度(不是颜色)
- *   「我」      → 唯一的强调色
- *   关系正负   → 正向几乎融进背景,**负向才用暖色**并加虚线
- *                让"矛盾"成为画面上唯一跳出来的东西
- *   关系强度   → 线宽
- *   关系类别   → 中点标记符,放大后才浮现,平时不占画面
- *   派系       → 默认靠**空间聚集**读;顶栏开关切到「派系着色」才上色,
- *                那时才用经过色觉障碍校验的分类色板
+ * 视觉照着参考图做:深蓝夜空 + 发光的立体球 + 流光连线。
+ * 全部用 SVG 渐变实现,**不用 filter** —— iOS Safari 上 filter 极慢,
+ * 用它做发光会把服务端算布局省下来的功耗全赔进去。
  *
- * 发光效果用 SVG 径向渐变画的同心光晕,**不用 filter**。
- * iOS Safari 上 filter/backdrop-filter 极慢,用它做发光会直接把
- * 服务端算布局省下来的功耗全赔进去。
+ * 球体是四层叠出来的:
+ *   1. 外光晕   更大的圆,同色径向渐变淡出到透明
+ *   2. 球身     径向渐变把中心偏到左上(亮→本色→暗),这样就有了体积感
+ *   3. 高光     左上一个白色小椭圆 —— 这一笔是"玻璃球"感的关键
+ *   4. 细亮边   白色低透明度描边,把球从背景里"切"出来
  *
- * 颜色全部走 CSS 自定义属性,所以系统切换深浅色时浏览器直接重新着色,
- * 不需要重建 SVG。
+ * buildSVG() 是纯函数(payload + 样式参数 → SVG 字符串),
+ * 所以对比页可以用同一份代码渲染三档不同强度,不必复制逻辑 ——
+ * 保证"你在对比页看到的,就是你会得到的"。
  */
 
-const GraphView = (() => {
-  const ZOOM_REVEAL = 0.92;   // 超过这个缩放级别,全部名字和首字浮现
+const GraphStyles = {
+  // 三档强度,方向相同(都照参考图),只在浓淡上不同
+  A: { name: "A · 忠于参考图", ball: 1.15, glow: 2.9, glowOp: 0.62,
+       edgeW: 1.5, edgeOp: 0.60, stars: 150, nameSize: 13.5, streak: true },
+  B: { name: "B · 中间", ball: 1.0, glow: 2.3, glowOp: 0.45,
+       edgeW: 1.15, edgeOp: 0.50, stars: 90, nameSize: 12.5, streak: true },
+  C: { name: "C · 收敛", ball: 0.85, glow: 1.7, glowOp: 0.28,
+       edgeW: 0.9, edgeOp: 0.42, stars: 40, nameSize: 11.5, streak: false },
+};
 
+const GraphView = (() => {
   let stage, canvas, svg;
   let data = null;
   let tx = 0, ty = 0, scale = 1;
   let cb = {};
   let settleTimer = null;
+  let style = GraphStyles.B;
 
   function init(opts) {
     stage = document.getElementById("stage");
@@ -39,101 +44,27 @@ const GraphView = (() => {
     bindGestures();
   }
 
-  function esc(s) {
-    return String(s == null ? "" : s).replace(/[&<>"]/g, c =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  }
+  function setStyle(s) { style = s || GraphStyles.B; }
 
   function apply() {
     canvas.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
-    scheduleSettle();
-  }
-
-  /* 缩放稳定后再补偿字号。
-     手势进行中让文字跟着一起缩放是自然的;松手后统一归位。
-     绝不在每一帧改字号 —— 那会让几十个文本节点反复重排,直接发热。
-     这里只写一个 CSS 变量,是 O(1) 的。 */
-  function scheduleSettle() {
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(settle, 90);
   }
+
+  /* 缩放稳定后再补偿字号:手势进行中让文字跟着缩放是自然的,松手后归位。
+     绝不在每一帧改字号 —— 那会让几十个文本节点反复重排,直接发热。
+     这里只写一个 CSS 变量,是 O(1) 的。 */
   function settle() {
     svg.style.setProperty("--gscale", scale.toFixed(3));
-    svg.classList.toggle("zoomed", scale >= ZOOM_REVEAL);
   }
-
-  /* ---------------- 渲染 ---------------- */
 
   function render(payload) {
     data = payload;
-    const W = payload.width, H = payload.height;
-    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-    svg.setAttribute("width", W);
-    svg.setAttribute("height", H);
-
-    const out = [];
-
-    out.push("<defs>");
-    // 光晕:纯径向渐变填充,不是滤镜。只给重要节点和「我」,避免画面糊成一片。
-    for (const [id, v] of [["0", "--n-hi"], ["1", "--n-hi"], ["2", "--n-hi"],
-                           ["3", "--n-hi"], ["me", "--accent"]]) {
-      out.push(
-        `<radialGradient id="halo${id}">` +
-        `<stop offset="30%" stop-color="var(${v})" stop-opacity="0.5"/>` +
-        `<stop offset="100%" stop-color="var(${v})" stop-opacity="0"/>` +
-        `</radialGradient>`);
-    }
-    out.push("</defs>");
-
-    // --- 边(先画,压在节点下面)---
-    out.push('<g id="edges">');
-    for (const e of payload.edges) {
-      const neg = e.w < 0;
-      const cls = neg ? "neg" : "pos";
-      const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
-      const dash = neg ? ' stroke-dasharray="8 6"' : "";
-      out.push(
-        `<g class="eg" data-a="${e.a}" data-b="${e.b}">` +
-        `<path class="edge ${cls}" d="${d}" stroke-width="${e.width}"${dash}/>` +
-        `<path class="edge-hit" d="${d}"/>` +
-        `<text class="eglyph ${cls}" x="${e.mx}" y="${e.my}">${esc(e.glyph)}</text>` +
-        `<text class="elabel" x="${e.mx}" y="${e.my - 15}">${esc(e.label)}` +
-        (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
-        `</g>`);
-    }
-    out.push("</g>");
-
-    // --- 节点 ---
-    // 亮度分三档:重要的人更亮更大,边缘的人沉下去。用亮度而不是颜色做层级,
-    // 是"深空极简"最核心的一条 —— 颜色留给真正需要被看见的东西。
-    const rs = payload.nodes.map(n => n.r).sort((a, b) => b - a);
-    const hiCut = rs[Math.floor(rs.length * 0.22)] ?? 0;
-    const midCut = rs[Math.floor(rs.length * 0.62)] ?? 0;
-
-    out.push('<g id="nodes">');
-    for (const n of payload.nodes) {
-      const slot = n.frank < 3 ? n.frank : 3;      // 派系着色模式才用得上
-      const tier = n.r >= hiCut ? "t-hi" : (n.r >= midCut ? "t-mid" : "t-lo");
-      const cls = "node " + tier + " f" + (slot === 3 ? "0" : slot + 1) +
-                  (n.is_me ? " me" : "") + (n.key ? " key" : "");
-      out.push(
-        `<g class="${cls}" data-id="${n.id}">` +
-        (tier === "t-hi" || n.is_me
-          ? `<circle class="halo" cx="${n.x}" cy="${n.y}" ` +
-            `r="${(n.r * 3.1).toFixed(1)}" fill="url(#halo${n.is_me ? "me" : slot})"/>`
-          : "") +
-        (n.is_me
-          ? `<circle class="ring" cx="${n.x}" cy="${n.y}" r="${(n.r + 5).toFixed(1)}"/>`
-          : "") +
-        `<circle class="disc" cx="${n.x}" cy="${n.y}" r="${n.r}"/>` +
-        `<text class="ini" x="${n.x}" y="${n.y}">${esc(n.initial)}</text>` +
-        `<text class="nm" x="${n.x}" y="${(n.y + n.r + 15).toFixed(1)}">` +
-        `${esc(n.name)}</text>` +
-        `</g>`);
-    }
-    out.push("</g>");
-
-    svg.innerHTML = out.join("");
+    svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
+    svg.setAttribute("width", payload.width);
+    svg.setAttribute("height", payload.height);
+    svg.innerHTML = GraphRender.buildSVG(payload, style);
 
     svg.querySelectorAll(".node").forEach(g => {
       g.addEventListener("click", ev => {
@@ -144,8 +75,7 @@ const GraphView = (() => {
     svg.querySelectorAll(".eg .edge-hit").forEach(p => {
       p.addEventListener("click", ev => {
         ev.stopPropagation();
-        const g = p.parentNode;
-        if (cb.onEdge) cb.onEdge(+g.dataset.a, +g.dataset.b);
+        if (cb.onEdge) cb.onEdge(+p.parentNode.dataset.a, +p.parentNode.dataset.b);
       });
     });
   }
@@ -163,8 +93,7 @@ const GraphView = (() => {
     svg.querySelectorAll(".eg").forEach(g => {
       const a = +g.dataset.a, b = +g.dataset.b;
       const hit = a === pid || b === pid;
-      g.querySelectorAll(".edge,.eglyph,.elabel").forEach(el =>
-        el.classList.toggle("near", hit));
+      g.classList.toggle("near", hit);
       if (hit) { near.add(a); near.add(b); }
     });
     svg.querySelectorAll(".node").forEach(g => {
@@ -179,10 +108,9 @@ const GraphView = (() => {
     svg.querySelectorAll(".near,.sel").forEach(el =>
       el.classList.remove("near", "sel"));
     svg.querySelectorAll(".eg").forEach(g => {
-      const hit = (+g.dataset.a === a && +g.dataset.b === b) ||
-                  (+g.dataset.a === b && +g.dataset.b === a);
-      g.querySelectorAll(".edge,.eglyph,.elabel").forEach(el =>
-        el.classList.toggle("near", hit));
+      g.classList.toggle("near",
+        (+g.dataset.a === a && +g.dataset.b === b) ||
+        (+g.dataset.a === b && +g.dataset.b === a));
     });
     svg.querySelectorAll(".node").forEach(g => {
       const id = +g.dataset.id;
@@ -193,20 +121,32 @@ const GraphView = (() => {
 
   /* ---------------- 视口 ---------------- */
 
+  /* 包围盒必须把名字的宽度算进去。
+     只按节点坐标算的后果:iPhone 上最右边那几个人的名字被屏幕边缘切掉半个。 */
+  function bbox() {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const fs = style.nameSize;
+    for (const n of data.nodes) {
+      const halfW = Math.max(n.r, n.name.length * fs * 0.56 / 2) + 6;
+      minX = Math.min(minX, n.x - halfW);
+      maxX = Math.max(maxX, n.x + halfW);
+      minY = Math.min(minY, n.y - n.r - 6);
+      maxY = Math.max(maxY, n.y + n.r + fs + 12);
+    }
+    return { minX, maxX, minY, maxY };
+  }
+
   function fit(bottomInset) {
     if (!data || !data.nodes.length) return;
-    const xs = data.nodes.map(n => n.x), ys = data.nodes.map(n => n.y);
-    const pad = 60;
-    const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
-    const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
-    const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+    const pad = 34;
+    const b = bbox();
+    const w = Math.max(1, b.maxX - b.minX + pad * 2);
+    const h = Math.max(1, b.maxY - b.minY + pad * 2);
     const r = stage.getBoundingClientRect();
-    const inset = bottomInset || 0;
-    const availH = Math.max(120, r.height - inset);
-    // 上限 1.15:贴合后不要放得比 1:1 大太多,免得节点显得笨重
-    scale = Math.max(0.28, Math.min(1.15, Math.min(r.width / w, availH / h)));
-    tx = (r.width - w * scale) / 2 - minX * scale;
-    ty = (availH - h * scale) / 2 - minY * scale;
+    const availH = Math.max(120, r.height - (bottomInset || 0));
+    scale = Math.max(0.25, Math.min(1.3, Math.min(r.width / w, availH / h)));
+    tx = (r.width - w * scale) / 2 - (b.minX - pad) * scale;
+    ty = (availH - h * scale) / 2 - (b.minY - pad) * scale;
     apply();
     settle();
   }
@@ -223,15 +163,12 @@ const GraphView = (() => {
     apply();
   }
 
-  /* ---------------- 手势 ----------------
-     全程只更新 tx/ty/scale 三个数,然后写一次 CSS transform。
-     不重建 SVG、不重算布局 —— CPU 占用可以忽略。 */
+  /* ---------------- 手势 ---------------- */
 
   function bindGestures() {
     let mode = null, moved = false;
     let sx = 0, sy = 0, stx = 0, sty = 0;
     let sdist = 0, sscale = 1, pivot = null;
-
     const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 
     stage.addEventListener("touchstart", e => {
@@ -259,7 +196,7 @@ const GraphView = (() => {
         tx = stx + dx; ty = sty + dy;
         apply();
       } else if (mode === "pinch" && e.touches.length === 2) {
-        const ns = Math.max(0.1, Math.min(6,
+        const ns = Math.max(0.12, Math.min(6,
           sscale * (dist(e.touches[0], e.touches[1]) / sdist)));
         tx = pivot.x - (pivot.x - stx) * (ns / sscale);
         ty = pivot.y - (pivot.y - sty) * (ns / sscale);
@@ -276,7 +213,6 @@ const GraphView = (() => {
       }
     });
 
-    // 桌面端
     let dragging = false;
     stage.addEventListener("mousedown", e => {
       dragging = true; moved = false;
@@ -297,7 +233,7 @@ const GraphView = (() => {
       e.preventDefault();
       const r = stage.getBoundingClientRect();
       const px = e.clientX - r.left, py = e.clientY - r.top;
-      const ns = Math.max(0.1, Math.min(6,
+      const ns = Math.max(0.12, Math.min(6,
         scale * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
       tx = px - (px - tx) * (ns / scale);
       ty = py - (py - ty) * (ns / scale);
@@ -306,29 +242,167 @@ const GraphView = (() => {
     }, { passive: false });
   }
 
-  /* 派系着色开关 */
+  /* 派系着色开关。渐变填充没法靠 CSS 类切换(fill="url(#id)" 写死在属性上),
+     所以这里一次性把每个球的 fill 换掉 —— 只在点开关时跑一遍,O(节点数)。 */
   function setFactionMode(on) {
     svg.classList.toggle("by-faction", !!on);
+    svg.querySelectorAll(".node").forEach(g => {
+      const isMe = g.classList.contains("me");
+      const ball = g.querySelector(".ball");
+      const glow = g.querySelector(".glow");
+      if (isMe) return;                       // 「我」永远用强调色
+      if (on) {
+        ball.setAttribute("fill", `url(#${ball.dataset.fac})`);
+        glow.setAttribute("fill", `url(#${glow.dataset.fac})`);
+      } else {
+        ball.setAttribute("fill", "url(#sph_sph)");
+        glow.setAttribute("fill", "url(#glow_sph)");
+      }
+    });
   }
 
-  /* 给卡片里的头像用,保证跟图上一致 */
   function nodeColor(id) {
-    if (!data) return "var(--n-mid)";
+    if (!data) return "var(--sph)";
     const n = data.nodes.find(x => x.id === id);
-    if (!n) return "var(--n-mid)";
-    if (n.is_me) return "var(--accent)";
-    if (svg.classList.contains("by-faction")) {
-      return n.frank < 3 ? `var(--f${n.frank + 1})` : "var(--f0)";
-    }
-    const rs = data.nodes.map(x => x.r).sort((a, b) => b - a);
-    const hiCut = rs[Math.floor(rs.length * 0.22)] ?? 0;
-    const midCut = rs[Math.floor(rs.length * 0.62)] ?? 0;
-    return n.r >= hiCut ? "var(--n-hi)"
-         : (n.r >= midCut ? "var(--n-mid)" : "var(--n-lo)");
+    if (!n) return "var(--sph)";
+    if (n.is_me) return "var(--me)";
+    if (svg.classList.contains("by-faction"))
+      return n.frank < 3 ? `var(--f${n.frank + 1})` : "var(--f1)";
+    return "var(--sph)";
   }
-
-  function currentScale() { return scale; }
 
   return { init, render, fit, focus, focusEdge, centerOn, nodeColor,
-           setFactionMode, currentScale };
+           setFactionMode, setStyle };
+})();
+
+
+/* ============================================================
+   纯渲染:payload + 样式 → SVG 字符串
+   ============================================================ */
+
+const GraphRender = (() => {
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  /* 固定种子的伪随机 —— 星点每次都在同一个位置,不会闪来闪去 */
+  function rng(seed) {
+    let s = seed >>> 0;
+    return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+  }
+
+  function stars(w, h, count) {
+    if (!count) return "";
+    const r = rng(20260126);
+    const out = ['<g class="stars">'];
+    for (let i = 0; i < count; i++) {
+      out.push(`<circle cx="${(r() * w).toFixed(1)}" cy="${(r() * h).toFixed(1)}" ` +
+               `r="${(0.6 + r() * 1.5).toFixed(2)}" ` +
+               `opacity="${(0.15 + r() * 0.6).toFixed(2)}"/>`);
+    }
+    out.push("</g>");
+    return out.join("");
+  }
+
+  /* 球体的三段渐变。中心偏到左上,才有体积感。 */
+  function sphereDef(id, v) {
+    return `<radialGradient id="${id}" cx="34%" cy="28%" r="76%">` +
+           `<stop offset="0%"   stop-color="var(${v}-lt)"/>` +
+           `<stop offset="52%"  stop-color="var(${v})"/>` +
+           `<stop offset="100%" stop-color="var(${v}-dk)"/></radialGradient>`;
+  }
+
+  function glowDef(id, v, op) {
+    return `<radialGradient id="${id}">` +
+           `<stop offset="33%" stop-color="var(${v})" stop-opacity="${op}"/>` +
+           `<stop offset="68%" stop-color="var(${v})" stop-opacity="${(op * 0.3).toFixed(3)}"/>` +
+           `<stop offset="100%" stop-color="var(${v})" stop-opacity="0"/></radialGradient>`;
+  }
+
+  const PALETTES = [["sph", "--sph"], ["me", "--me"],
+                    ["f1", "--f1"], ["f2", "--f2"], ["f3", "--f3"]];
+
+  function buildSVG(payload, st, idPrefix) {
+    const style = st || GraphStyles.B;
+    const P = idPrefix || "";              // 一个页面渲染多份时用来隔离 id
+    const W = payload.width, H = payload.height;
+    const dens = payload.density || 1;     // 人越多,光晕越收,免得糊成一片
+    const glowOp = (style.glowOp * (0.55 + 0.45 * dens)).toFixed(3);
+    const out = [];
+
+    out.push("<defs>");
+    for (const [id, v] of PALETTES) {
+      out.push(sphereDef(`${P}sph_${id}`, v));
+      out.push(glowDef(`${P}glow_${id}`, v, glowOp));
+    }
+    if (style.streak) {
+      // 流光连线:两端淡出、中间实 —— 线就有了光带的收束感
+      for (const e of payload.edges) {
+        const v = e.w < 0 ? "--neg" : "--pos";
+        out.push(
+          `<linearGradient id="${P}e${e.a}_${e.b}" gradientUnits="userSpaceOnUse" ` +
+          `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}">` +
+          `<stop offset="0%"   stop-color="var(${v})" stop-opacity="0.06"/>` +
+          `<stop offset="30%"  stop-color="var(${v})" stop-opacity="1"/>` +
+          `<stop offset="70%"  stop-color="var(${v})" stop-opacity="1"/>` +
+          `<stop offset="100%" stop-color="var(${v})" stop-opacity="0.06"/>` +
+          `</linearGradient>`);
+      }
+    }
+    out.push("</defs>");
+
+    // 星点压在最底层
+    out.push(stars(W, H, Math.round(style.stars * (W * H) / 1300000)));
+
+    out.push('<g class="edges">');
+    for (const e of payload.edges) {
+      const neg = e.w < 0;
+      const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
+      const stroke = style.streak
+        ? `url(#${P}e${e.a}_${e.b})` : `var(${neg ? "--neg" : "--pos"})`;
+      const op = neg ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
+      out.push(
+        `<g class="eg ${neg ? "neg" : "pos"}" data-a="${e.a}" data-b="${e.b}">` +
+        `<path class="edge" d="${d}" stroke="${stroke}" ` +
+          `stroke-width="${(e.width * style.edgeW).toFixed(2)}" ` +
+          `opacity="${op.toFixed(2)}"${neg ? ' stroke-dasharray="7 6"' : ""}/>` +
+        `<path class="edge-hit" d="${d}"/>` +
+        `<text class="elabel" x="${e.mx}" y="${e.my - 11}">` +
+          `${esc(e.glyph)} ${esc(e.label)}` +
+          (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
+        `</g>`);
+    }
+    out.push("</g>");
+
+    out.push('<g class="nodes">');
+    for (const n of payload.nodes) {
+      const r = n.r * style.ball;
+      const pal = n.is_me ? "me" : "sph";
+      const fac = n.frank < 3 ? "f" + (n.frank + 1) : "f1";
+      out.push(
+        `<g class="node ${n.is_me ? "me " : ""}fac-${fac}" data-id="${n.id}">` +
+        `<circle class="glow" cx="${n.x}" cy="${n.y}" ` +
+          `r="${(r * style.glow).toFixed(1)}" fill="url(#${P}glow_${pal})" ` +
+          `data-fac="${P}glow_${fac}"/>` +
+        `<circle class="ball" cx="${n.x}" cy="${n.y}" r="${r.toFixed(1)}" ` +
+          `fill="url(#${P}sph_${pal})" data-fac="${P}sph_${fac}"/>` +
+        `<circle class="rim" cx="${n.x}" cy="${n.y}" r="${r.toFixed(1)}"/>` +
+        `<ellipse class="spec" cx="${(n.x - r * 0.30).toFixed(1)}" ` +
+          `cy="${(n.y - r * 0.36).toFixed(1)}" ` +
+          `rx="${(r * 0.36).toFixed(1)}" ry="${(r * 0.23).toFixed(1)}"/>` +
+        `<text class="ini" x="${n.x}" y="${n.y}" ` +
+          `style="font-size:${(r * 0.7).toFixed(1)}px">${esc(n.initial)}</text>` +
+        `<text class="nm" x="${n.x}" ` +
+          `y="${(n.y + r + style.nameSize + 4).toFixed(1)}" ` +
+          `style="font-size:calc(${style.nameSize}px / var(--gscale,1))">` +
+          `${esc(n.name)}</text></g>`);
+    }
+    out.push("</g>");
+
+    return out.join("");
+  }
+
+  return { buildSVG, esc };
 })();
