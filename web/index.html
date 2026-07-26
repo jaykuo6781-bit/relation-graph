@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="关系图">
-<meta name="theme-color" content="#0a0a0c">
+<meta name="theme-color" content="#080c18">
 <script>
   // 在样式表加载前就把主题定下来,避免打开时闪一下白屏
   try {
@@ -23,14 +23,24 @@
 <body>
 
 <header id="topbar">
-  <button id="circleBtn"></button>
+  <button id="circleBtn" aria-haspopup="true" aria-expanded="false"
+          aria-controls="circleMenu"></button>
   <div class="spacer"></div>
-  <button id="facBtn" class="icon-btn" title="灰阶 / 按派系着色">◐</button>
-  <button id="themeBtn" class="icon-btn" title="深色 / 浅色">☀</button>
-  <button id="fitBtn" class="icon-btn" title="复位">⊹</button>
-  <button id="maskBtn" class="icon-btn" title="打码 / 取消打码">🕶</button>
+  <button id="facBtn" class="icon-btn" title="灰阶 / 按派系着色"
+          aria-label="灰阶 / 按派系着色" aria-pressed="false">◐</button>
+  <button id="themeBtn" class="icon-btn" title="深色 / 浅色"
+          aria-label="切换深色或浅色主题">☀</button>
+  <button id="fitBtn" class="icon-btn" title="复位"
+          aria-label="把图复位到刚好铺满屏幕">⊹</button>
+  <button id="maskBtn" class="icon-btn" title="打码 / 取消打码"
+          aria-label="给人名打码" aria-pressed="false">🕶</button>
+
+  <!-- 必须放在 #topbar **内部**。它 position:absolute;top:100%,而定位参照的是
+       最近的已定位祖先 —— #topbar 有 position:relative,body 没有。
+       之前它是 <header> 的兄弟,参照系变成初始包含块(视口大小),
+       top:100% 就等于视口高度,菜单整个落到屏幕外,点了像没反应。 -->
+  <div id="circleMenu" class="hidden" role="menu"></div>
 </header>
-<div id="circleMenu" class="hidden"></div>
 
 <main id="views">
 

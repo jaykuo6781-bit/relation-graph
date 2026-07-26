@@ -46,13 +46,34 @@ function viewAspect() {
   return r.height > 0 ? (r.width / r.height).toFixed(2) : "1";
 }
 
-/* 图要避开的下方遮挡:AI 输入栏 + 底部导航 + 安全区。
+/* AI 输入栏的实测高度写成 CSS 变量 --aibar-h。
+   它会随内容变高(textarea 换行到 108px、挂了附件还要再加一行缩略图),
+   所以图例的落点和 bottomInset() 都必须读同一个真值 —— 各自估一个数,
+   迟早对不上。之前图例写死 bottom:14px、输入栏 bottom:12px,
+   两者完全重叠且输入栏 z-index 更高,图例从来没被人看见过。 */
+function measureAiBar() {
+  const bar = $("#aibar"), stage = $("#stage");
+  if (!bar || !stage) return;
+  const h = bar.classList.contains("hidden")
+    ? 0 : bar.getBoundingClientRect().height;
+  stage.style.setProperty("--aibar-h", h.toFixed(0) + "px");
+}
+
+function watchAiBar() {
+  const bar = $("#aibar");
+  if (!bar) return;
+  // ResizeObserver 只在高度真的变化时回调,不是每帧
+  if (typeof ResizeObserver === "function") new ResizeObserver(measureAiBar).observe(bar);
+  measureAiBar();
+}
+
+/* 图要避开的下方遮挡:AI 输入栏 + 安全区。
    v2 这里写死了 90,结果下缘的节点被输入框吃掉。 */
 function bottomInset() {
-  const bar = $("#aibar");
-  const h = (bar && !bar.classList.contains("hidden"))
-    ? bar.getBoundingClientRect().height + 24 : 0;
-  return h;
+  const stage = $("#stage");
+  if (!stage) return 0;
+  const v = parseFloat(getComputedStyle(stage).getPropertyValue("--aibar-h"));
+  return v > 0 ? v + 24 : 0;
 }
 
 function esc(s) {
@@ -69,6 +90,40 @@ function toast(msg) {
   t.classList.remove("hidden");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.add("hidden"), 2600);
+}
+
+/* 把一个 async 事件处理器包起来,失败时给出人话提示。
+   在这之前,导入/改名/删除这些按钮全都是裸 `await api(...)` —— 服务端返回
+   {"error": ...} 时 api() 会 throw,而没人 catch,于是变成一条未处理的
+   Promise rejection:按钮按下去,没 toast、没变化、什么都不发生,
+   用户只会再按一次。 */
+function guard(fn, label) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (e) {
+      busy(false);
+      toast(humanError(e, label));
+    }
+  };
+}
+
+/* fetch 本身失败(服务没开、手机不在 Tailscale 里)时抛的是
+   "Failed to fetch" —— 一句用户完全看不懂的英文。 */
+function humanError(e, label) {
+  const m = (e && e.message) || String(e);
+  if (/failed to fetch|networkerror|load failed/i.test(m))
+    return "连不上电脑上的服务。确认 run.bat 还在运行,手机也在同一个 Tailscale 网络里。";
+  return (label ? label + ":" : "") + m;
+}
+
+/* 导入成功后只清掉写进去的那些行,解析失败/重复的行留在框里等你改。
+   之前是整块 value = "",失败行跟着一起没,只能重打。 */
+function keepFailedLines(sel, badRows) {
+  const el = $(sel);
+  if (!el) return;
+  if (!badRows || !badRows.length) { el.value = ""; return; }
+  el.value = badRows.map(r => r.raw || "").filter(Boolean).join("\n");
 }
 
 function busy(on, msg) {
@@ -96,7 +151,8 @@ function avatar(id, name, size) {
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", t === "light" ? "#f6f6f7" : "#0a0a0c");
+  // 必须和 --bg-0 一致,否则 iOS 状态栏和顶栏之间会有一条可见的色差缝
+  if (meta) meta.setAttribute("content", t === "light" ? "#f4f6f8" : "#080c18");
   const b = $("#themeBtn");
   if (b) b.textContent = t === "light" ? "☾" : "☀";
 }
@@ -133,6 +189,13 @@ async function boot() {
       '(需和电脑在同一个 Tailscale 网络里)。</p></div>';
     return;
   }
+  // 兜底:任何漏了 guard 的地方也不会再静默失败
+  window.addEventListener("unhandledrejection", ev => {
+    busy(false);
+    toast(humanError(ev.reason));
+    ev.preventDefault();
+  });
+
   initTheme();
   // 视觉强度档位。对比页定稿后把默认值改成用户选的那一档。
   GraphView.setStyle(GraphStyles[localStorage.getItem("gstyle") || "B"]);
@@ -159,7 +222,7 @@ async function boot() {
   $("#circleBtn").onclick = toggleCircleMenu;
   document.addEventListener("click", e => {
     if (!e.target.closest("#circleBtn") && !e.target.closest("#circleMenu"))
-      $("#circleMenu").classList.add("hidden");
+      setCircleMenuOpen(false);
   });
 
   // 复位 = 把拖过的球放回算法排的位置(拖动本就不持久化)+ 重新贴合视口
@@ -191,19 +254,23 @@ async function boot() {
   });
 
   bindAiBar();
-  await refresh();
-
-  const saved = +localStorage.getItem("circle");
-  S.circle = S.state.circles.find(c => c.id === saved) || S.state.circles[0];
+  watchAiBar();
+  await refresh();          // 圈子在这里面就定好了,人也是按圈子取的
   paintCircleBtn();
   await loadGraph();
 }
 
 async function refresh() {
   S.state = await api("/api/state");
-  if (S.circle) {
-    S.circle = S.state.circles.find(c => c.id === S.circle.id) || S.state.circles[0];
-  }
+  /* 必须在取人之前把圈子定下来 —— cq() 读的就是 S.circle。
+     首次启动时 S.circle 还是 null,拼出来是 "circle="(空),
+     服务端把空值当"全部圈子",于是人物页列出全库的人
+     (演示数据下:公司圈只有 19 人,列表却有 25 个)。 */
+  const saved = +localStorage.getItem("circle");
+  S.circle = (S.circle && S.state.circles.find(c => c.id === S.circle.id))
+    || S.state.circles.find(c => c.id === saved)
+    || S.state.circles[0]
+    || null;
   S.people = (await api("/api/people?" + cq())).people;
 }
 
@@ -216,6 +283,7 @@ function switchView(name) {
     b.classList.toggle("on", b.dataset.view === name));
   $("#aibar").classList.toggle("hidden", name !== "graph");
   $("#fitBtn").classList.toggle("hidden", name !== "graph");
+  measureAiBar();          // 显隐变了,图例的落点要跟着变
 
   if (name === "graph" && !S.graphLoaded) loadGraph();
   if (name === "people") renderPeople();
@@ -232,10 +300,15 @@ function paintCircleBtn() {
     `<span class="caret">▾</span>`;
 }
 
+function setCircleMenuOpen(open) {
+  $("#circleMenu").classList.toggle("hidden", !open);
+  $("#circleBtn").setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function toggleCircleMenu(e) {
   e.stopPropagation();
   const m = $("#circleMenu");
-  if (!m.classList.contains("hidden")) return m.classList.add("hidden");
+  if (!m.classList.contains("hidden")) return setCircleMenuOpen(false);
 
   m.innerHTML =
     S.state.circles.map(c => `
@@ -253,17 +326,17 @@ function toggleCircleMenu(e) {
 
   m.querySelectorAll("[data-cid]").forEach(b => {
     b.onclick = () => {
-      m.classList.add("hidden");
+      setCircleMenuOpen(false);
       switchCircle(+b.dataset.cid);
     };
   });
   m.querySelector('[data-act="new"]').onclick = () => {
-    m.classList.add("hidden"); newCircle();
+    setCircleMenuOpen(false); newCircle();
   };
   m.querySelector('[data-act="manage"]').onclick = () => {
-    m.classList.add("hidden"); switchView("settings");
+    setCircleMenuOpen(false); switchView("settings");
   };
-  m.classList.remove("hidden");
+  setCircleMenuOpen(true);
 }
 
 async function switchCircle(cid) {
@@ -320,8 +393,8 @@ function paintLegend() {
   if (!g) return;
   $("#legend").innerHTML =
     `<span class="k">${g.nodes.length} 人 · ${g.edges.length} 条关系</span><br>` +
-    `<span class="k"><i class="sw" style="background:var(--text-2);opacity:.35"></i>正向</span>` +
-    `<span class="k"><i class="sw" style="background:var(--neg)"></i>负向</span>` +
+    `<span class="k"><i class="sw pos"></i>正向</span>` +
+    `<span class="k"><i class="sw neg"></i>负向</span>` +
     (S.byFaction ? `<span class="k">节点颜色 = 派系</span>`
                  : `<span class="k">节点亮度 = 重要程度</span>`);
 }
@@ -544,7 +617,7 @@ function bindAiBar() {
   });
   $("#aiSend").onclick = sendIngest;
   $("#aiAttach").onclick = () => $("#aiFile").click();
-  $("#aiFile").onchange = async e => {
+  $("#aiFile").onchange = guard(async e => {
     for (const f of e.target.files) {
       if (f.size > 12 * 1024 * 1024) { toast(`${f.name} 超过 12MB,太大了`); continue; }
       const data = await new Promise(res => {
@@ -557,7 +630,7 @@ function bindAiBar() {
     }
     e.target.value = "";
     paintFiles();
-  };
+  }, "读取文件失败");
   paintFiles();
 }
 
@@ -614,19 +687,42 @@ function showIngestUnconfigured() {
 
 function showReview(d) {
   const kinds = Object.keys(S.state.kinds);
-  const newPeople = d.persons.filter(p => p.action !== "update");
+  /* 以前这里是 filter(p => p.action !== "update"),把精确命中的人整个滤掉了 ——
+     后果是模型从材料里读到的「李明远升了总监」这类**已有人员的字段更新**
+     永远进不了库。现在全部列出,精确命中的默认不勾(避免拿模型的猜测
+     覆盖你手填的部门职位),想更新就自己勾上。 */
+  const people = d.persons;
 
-  const pRows = newPeople.map((p, i) => `
-    <div class="row">
-      <input type="checkbox" class="pchk" data-i="${i}" checked>
+  const pRows = people.map((p, i) => {
+    const fuzzy = p.match_type === "fuzzy";
+    const exact = p.match_type === "exact";
+    // 模糊命中必须由人来定夺:合并进已有的人,还是真的是另一个人。
+    // 默认选「合并」,但整行不预先勾选 —— 强迫看一眼再决定。
+    const choice = fuzzy ? `
+      <div class="hstack wrap" style="margin-top:6px">
+        <label class="hstack" style="gap:5px">
+          <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
+                 value="merge" checked>
+          <span>合并进「${esc(p.matched_name)}」</span></label>
+        <label class="hstack" style="gap:5px">
+          <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
+                 value="create">
+          <span>是另一个人,新建</span></label>
+      </div>` : "";
+    return `
+    <div class="row" style="align-items:flex-start">
+      <input type="checkbox" class="pchk" data-i="${i}"
+             ${fuzzy || exact ? "" : "checked"} style="margin-top:3px">
       <div class="main">
         <div class="nm blurable">${esc(p.name)}
-          ${p.match_type === "fuzzy"
-            ? `<span class="tag warn">疑似已有:${esc(p.matched_name)}</span>`
+          ${fuzzy ? `<span class="tag warn">名字很像:${esc(p.matched_name)}</span>`
+            : exact ? `<span class="tag">库里已有</span>`
             : '<span class="tag">新建</span>'}</div>
         <div class="meta">${esc(p.dept || "")} ${esc(p.title || "")}</div>
+        ${choice}
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   const rRows = d.relations.map((r, i) => `
     <div class="card">
@@ -661,7 +757,7 @@ function showReview(d) {
     <div class="sub">用的是 ${esc(d.model)}。<b>每条都附了原文摘录</b>,
       扫一眼就知道它有没有编。确认无误的才会入库到「${esc(S.circle.name)}」。</div>
 
-    <div class="sec">人物(${newPeople.length})</div>
+    <div class="sec">人物(${people.length})</div>
     <div class="list">${pRows || '<div class="dimtext">没有新人物</div>'}</div>
 
     <div class="sec">关系(${d.relations.length})</div>
@@ -674,8 +770,17 @@ function showReview(d) {
   sheet.classList.remove("hidden");
 
   $("#reviewOk").onclick = async () => {
-    const persons = newPeople.map((p, i) => ({
-      ...p, accepted: $(`.pchk[data-i="${i}"]`).checked }));
+    const persons = people.map((p, i) => {
+      const merge = document.querySelector(`.pmerge[data-i="${i}"]:checked`);
+      return {
+        ...p,
+        // 模糊行选了「合并」就走 matched_id,选「新建」则清掉它,
+        // 否则 llm.commit 会把它当同一个人
+        action: merge ? (merge.value === "merge" ? "merge" : "create") : p.action,
+        matched_id: merge && merge.value === "create" ? null : p.matched_id,
+        accepted: $(`.pchk[data-i="${i}"]`).checked,
+      };
+    });
     const relations = d.relations.map((r, i) => ({
       ...r,
       kind: $(`.rkind[data-i="${i}"]`).value,
@@ -796,37 +901,69 @@ function renderSettings() {
     <div class="sec">外观</div>
     <div class="card"><div class="hint" style="margin:0">
       默认深色。顶栏的 ☀/☾ 切换深浅,🎨 在「灰阶」和「按派系着色」之间切换。<br>
-      灰阶模式下颜色只出现在两个地方:「我」和<b style="color:var(--neg)">负向关系</b> ——
+      灰阶模式下颜色只出现在两个地方:「我」和<b style="color:var(--neg-ink)">负向关系</b> ——
       让矛盾成为画面上唯一跳出来的东西。
     </div></div>
 
     <div class="sec">隐私</div>
     <div class="card"><div class="hint" style="margin:0">
       · 服务只监听本机和 Tailscale,公网扫不到<br>
-      · 数据只存在这台电脑上,不上传任何地方<br>
+      · 数据库只存在这台电脑上,<b>不会自动上传</b><br>
       · 顶栏的 🕶 一键把所有人名打码,防止手机被人瞥见<br>
       · <b>不要把 data 目录提交到任何公开仓库</b>
+    </div>
+    <div class="warnbox" style="margin-top:10px">
+      <b>但用 AI 录入时,内容会离开这台电脑。</b><br>
+      你输入的文字、上传的截图和文档,<b>以及当前圈子里全部人的姓名和部门</b>
+      (为了让模型不把「张伟」认成新人,名单会随每次请求一起发出),
+      都会发送给模型服务商。默认是 OpenAI。<br>
+      不想外发就别用底部那个输入栏 —— 手工录入和批量导入全程只走本机。
+      也可以把 <span class="mono">OPENAI_BASE_URL</span> 指向本地模型,
+      这样连接口调用都不出这台机器。
     </div></div>`;
 
-  $("#meSel").onchange = async e => {
+  $("#meSel").onchange = guard(async e => {
     if (!e.target.value) return;
     await api("/api/people/me", { id: +e.target.value });
     await refresh(); S.graphLoaded = false; toast("已设置");
-  };
+  }, "设置「我是谁」失败");
 
-  $("#rosterGo").onclick = async () => {
+  /* #rosterOut 这个容器一直存在,但从来没被填过 —— 按钮写着「预览并导入」,
+     实际直接弹一个 confirm 报个数字,根本没有预览。现在真的先给出差异。 */
+  $("#rosterGo").onclick = guard(async () => {
     const d = await api("/api/import/roster/preview", { text: $("#rosterText").value });
     if (!d.rows.length) return toast("没解析出内容");
-    const n = d.rows.filter(r => r.status !== "skip").length;
+    // importer.parse_roster 的状态只有三种:new / update / skip
+    // (skip = 本次粘贴里重复出现,不是解析失败)
+    const news = d.rows.filter(r => r.status === "new");
+    const ups  = d.rows.filter(r => r.status === "update");
+    const dup  = d.rows.filter(r => r.status === "skip");
+    $("#rosterOut").innerHTML =
+      `<div class="card"><div class="hint" style="margin:0">` +
+      `将<b>新建 ${news.length} 人</b>、<b>更新 ${ups.length} 人</b>` +
+      (dup.length ? `,跳过 ${dup.length} 行重复` : "") + `。<br>` +
+      (news.length ? `新建:${news.slice(0, 12).map(r => esc(r.name)).join("、")}` +
+        (news.length > 12 ? ` 等 ${news.length} 人` : "") + `<br>` : "") +
+      (ups.length ? `更新:${ups.slice(0, 12).map(r => esc(r.name)).join("、")}` +
+        (ups.length > 12 ? ` 等 ${ups.length} 人` : "") : "") +
+      `</div>` +
+      (dup.length ? `<div class="warnbox" style="margin-top:8px">` +
+        dup.map(r => `第 ${r.line} 行:${esc(r.message)}` +
+          `<br><span class="mono dimtext">${esc(r.raw || "")}</span>`).join("<br>") +
+        `</div>` : "") + `</div>`;
+    const bad = dup;
+    const n = news.length + ups.length;
+    if (!n) return toast("没有可写入的行");
     if (!confirm(`将写入 ${n} 人到「${S.circle.name}」,继续?`)) return;
     const res = await api("/api/import/roster/commit",
       { rows: d.rows, circle_id: S.circle.id });
-    $("#rosterText").value = "";
+    // 只清成功的部分,解析失败的行留在框里等你改 —— 全清等于让人重打一遍
+    keepFailedLines("#rosterText", bad);
     S.graphLoaded = false; await refresh(); renderSettings();
     toast(`新建 ${res.created} 人,更新 ${res.updated} 人`);
-  };
+  }, "导入名单失败");
 
-  $("#bulkGo").onclick = async () => {
+  $("#bulkGo").onclick = guard(async () => {
     const auto = $("#bulkAuto").checked;
     const d = await api("/api/import/relations/preview",
       { text: $("#bulkText").value, auto_create: auto });
@@ -841,13 +978,13 @@ function renderSettings() {
     if (!confirm(`将写入 ${good} 条关系到「${S.circle.name}」,继续?`)) return;
     const res = await api("/api/import/relations/commit",
       { rows: d.rows, auto_create: auto, circle_id: S.circle.id });
-    $("#bulkText").value = "";
+    keepFailedLines("#bulkText", bad);
     S.graphLoaded = false; await refresh(); renderSettings();
     toast(`写入 ${res.relations} 条关系` +
       (res.created_people ? `,新建 ${res.created_people} 人` : ""));
-  };
+  }, "导入关系失败");
 
-  $("#exportBtn").onclick = async () => {
+  $("#exportBtn").onclick = guard(async () => {
     const d = await api("/api/export");
     delete d._saved_to;
     const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
@@ -856,9 +993,9 @@ function renderSettings() {
     a.download = "relation-graph-backup.json";
     a.click();
     toast("已导出(电脑上也存了一份)");
-  };
+  }, "导出失败");
   $("#importBtn").onclick = () => $("#importFile").click();
-  $("#importFile").onchange = async e => {
+  $("#importFile").onchange = guard(async e => {
     const f = e.target.files[0];
     if (!f) return;
     try {
@@ -867,7 +1004,7 @@ function renderSettings() {
       S.graphLoaded = false; await refresh(); renderSettings();
       toast(`导入 ${res.people} 人 / ${res.relations} 条关系`);
     } catch (err) { toast("导入失败:" + err.message); }
-  };
+  }, "恢复备份失败");
   $("#seedBtn").onclick = loadSeed;
 }
 

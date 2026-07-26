@@ -508,6 +508,32 @@ def find_person_by_name(name):
     return None
 
 
+def add_alias(pid, alias):
+    """给某个人补一个别名。已有则原样返回,不会重复追加。
+
+    别名存成逗号分隔的一列(见 find_person_by_name 的解析方式)。
+    主要用途:AI 把「张伟」认成「张玮」并被人工确认为同一人之后,
+    把模型用的那个写法记下来,下次就能走精确匹配,不必再让人确认一遍。
+    """
+    alias = (alias or "").strip()
+    if not alias or not pid:
+        return False
+    with tx() as conn:
+        row = conn.execute("SELECT name, aliases FROM person WHERE id=?",
+                           (pid,)).fetchone()
+        if not row:
+            return False
+        cur = [a.strip() for a in (row["aliases"] or "").replace("，", ",").split(",")]
+        cur = [a for a in cur if a]
+        if alias == row["name"] or alias in cur:
+            return False
+        cur.append(alias)
+        conn.execute("UPDATE person SET aliases=?, updated_at=? WHERE id=?",
+                     (",".join(cur), time.time(), pid))
+        bump_version()
+    return True
+
+
 def upsert_person(name, dept="", title="", level=0, aliases="", tags="",
                   notes="", is_me=None, circle_id=None):
     """按姓名新建或更新。返回 (person_id, created?)。

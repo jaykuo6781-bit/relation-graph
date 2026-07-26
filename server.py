@@ -147,10 +147,17 @@ def api_person(handler, query, body):
     person = db.get_person(pid)
     if not person:
         return {"error": "找不到这个人"}
+    rels = db.relations_of(pid, cid)
+    # db.relations_of 不带类别信息,而人物卡要靠标记符区分「情感/利益/职场…」。
+    # api_pair 一直补了这两个字段,这里漏了,于是人物卡里的 glyph 永远是空字符串。
+    for r in rels:
+        info = db.RELATION_KINDS.get(r["kind"], {})
+        r["cat"] = info.get("cat", "社交")
+        r["glyph"] = db.CATEGORY_GLYPH.get(r["cat"], "")
     return {
         "person": person,
         "circles": db.circles_of(pid),
-        "relations": db.relations_of(pid, cid),
+        "relations": rels,
         "events": db.events_for_person(pid, cid),
     }
 

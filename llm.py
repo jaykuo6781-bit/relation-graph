@@ -266,7 +266,18 @@ def _match_person(name, people):
     if exact:
         return exact, "exact"
     names = [p["name"] for p in people]
-    close = difflib.get_close_matches(name, names, n=1, cutoff=0.75)
+    # cutoff 从 0.75 提到 0.85,并额外要求**姓氏相同**。
+    # 中文短姓名上编辑距离很不可靠:「张伟」和「张玮」只有 0.67(拦不住,
+    # 而这恰恰是 OCR 最常见的错法),「李明」和「李明远」却有 0.80
+    # (会被误判成同一人)。加一条"首字必须相同"能挡住后者,
+    # 前者则由下面的 initial 分支补回来。
+    close = difflib.get_close_matches(name, names, n=1, cutoff=0.85)
+    if not close and len(name) >= 2:
+        # 同姓 + 同长度 + 只差一个字 —— 典型的 OCR/听写错字
+        cand = [n for n in names
+                if n[0] == name[0] and len(n) == len(name)
+                and sum(a != b for a, b in zip(n, name)) == 1]
+        close = cand[:1]
     if close:
         for p in people:
             if p["name"] == close[0]:
@@ -345,6 +356,27 @@ def commit(payload, circle_id):
     for p in payload.get("persons", []):
         if not p.get("accepted", True) or p.get("action") == "skip":
             continue
+
+        # _align 已经把模型给的名字对到了库里的人(matched_id),但这里以前
+        # 直接拿 p["name"] 去 upsert,而 upsert_person 只按姓名**精确**匹配。
+        # 后果:模型把「张伟」OCR 成「张玮」→ 关系正确挂到张伟身上,
+        # 人物行却新建了一个叫「张玮」的孤立节点。整个 roster 机制就是为了
+        # 避免这件事,却在最后一步被抵消掉。
+        mid = p.get("matched_id")
+        if mid and p.get("action") in ("update", "merge"):
+            # 合并到已有的人:只补**非空**字段。
+            # update_person 不像 upsert_person 那样跳过空值,直接传空串
+            # 会把已有的部门职位抹掉。
+            fields = {k: p.get(k, "") for k in ("dept", "title") if p.get(k)}
+            if fields:
+                db.update_person(mid, **fields)
+            # 模型用的那个写法记成别名,下次就走精确匹配,不必再让人确认一遍
+            if p.get("name") and p["name"] != p.get("matched_name"):
+                db.add_alias(mid, p["name"])
+            if circle_id:
+                db.add_to_circle(mid, circle_id)
+            continue
+
         _, is_new = db.upsert_person(
             p["name"], p.get("dept", ""), p.get("title", ""),
             circle_id=circle_id)

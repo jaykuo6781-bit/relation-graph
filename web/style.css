@@ -31,7 +31,8 @@
 
   --text:#f2f3f5;
   --text-2:#9ba0aa;
-  --dim:#676c77;
+  --dim:#8b909b;          /* 实测 5.35~6.10:1。旧值 #676c77 只有 3.25,
+                             而它承担了 .hint/.meta/label/.sec/图例/底栏标签全部小字 */
 
   /* 球体色。每组三段:亮(高光侧)/ 本色 / 暗(背光侧),
      三段一起构成球的体积感。本色经 dataviz 校验。 */
@@ -44,8 +45,13 @@
   --f2:#d95926;  --f2-lt:#f2a077;  --f2-dk:#7a2c0d;
   --f3:#199e70;  --f3-lt:#6ddcb4;  --f3-dk:#0a4a33;
 
-  --pos:#7fd6e6;           /* 正向连线 */
-  --neg:#e66767;           /* 负向连线 */
+  --pos:#7fd6e6;           /* 正向连线(图形) */
+  --neg:#e66767;           /* 负向连线(图形) */
+  /* 文字专用。图形色是按线条在深底上的可见度选的,直接拿来写 11px 小字
+     对比度不够 —— 浅色主题下 --pos 在白底上只有 2.58:1。
+     --warn 早就是这么分深浅两套的,这里照同一个办法。 */
+  --pos-ink:#7fd6e6;
+  --neg-ink:#e66767;
   --node-ink:#ffffff;
 
   --warn:#e3b341;
@@ -68,7 +74,7 @@
 
   --text:#141519;
   --text-2:#565b66;
-  --dim:#878c96;
+  --dim:#696e7c;          /* 实测 4.70~5.09:1。旧值 #878c96 只有 3.12 */
 
   --sph:#068d9d;  --sph-lt:#4fc9d6;  --sph-dk:#034551;
   --me:#4b56cf;   --me-lt:#8f97ea;   --me-dk:#242b7d;
@@ -80,6 +86,8 @@
 
   --pos:#5aa9bb;
   --neg:#d8442f;
+  --pos-ink:#0d6577;
+  --neg-ink:#b8371f;
   --node-ink:#ffffff;
 
   --warn:#8a6704;
@@ -126,12 +134,15 @@ button{font-family:inherit;color:inherit}
 .icon-btn:active{background:var(--bg-2)}
 .icon-btn.on{color:var(--accent);background:var(--bg-2)}
 
+/* 定位参照 #topbar(它有 position:relative)。这个元素必须是 #topbar 的子元素 ——
+   放到 body 下面时参照系会变成初始包含块,top:100% 等于一整个视口高度。 */
 #circleMenu{
   position:absolute;top:100%;left:12px;min-width:230px;max-width:min(340px,88vw);
   z-index:45;background:var(--bg-1);border:1px solid var(--line);
   border-radius:14px;padding:6px;
   box-shadow:0 18px 48px rgba(0,0,0,.5);
   animation:pop .13s ease-out;
+  max-height:min(60vh,420px);overflow-y:auto;overscroll-behavior:contain;
 }
 @keyframes pop{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 .cmenu-item{
@@ -287,13 +298,26 @@ button{font-family:inherit;color:inherit}
 }
 .empty h3{color:var(--text);margin:0;font-size:17px;font-weight:600}
 
+/* 落点必须避开 AI 输入栏,而输入栏高度是动态的(换行、挂附件都会变高)——
+   所以由 JS 把实测高度写进 --aibar-h(见 app.js 的 measureAiBar)。
+   之前两者都贴着底、图例 z-index 更低,图例从来没被人看见过。 */
 #legend{
-  position:absolute;left:16px;bottom:14px;z-index:5;
+  position:absolute;left:16px;right:16px;z-index:5;
+  bottom:calc(var(--aibar-h, 0px) + 14px);
   font-size:11px;color:var(--dim);line-height:1.9;
   pointer-events:none;letter-spacing:.2px;
 }
 #legend .k{display:inline-flex;align-items:center;gap:5px;margin-right:12px}
-#legend .sw{width:14px;height:2px;border-radius:1px;display:inline-block}
+#legend .sw{width:16px;height:2px;border-radius:999px;display:inline-block}
+/* 图例的颜色必须**就是**图上那条线的颜色。之前正向色块画的是灰色 --text-2,
+   而图上的正向边是青色 --pos —— 图例在说明一个不存在的东西。 */
+#legend .sw.pos{background:var(--pos)}
+/* 负向边在图上是虚线(stroke-dasharray),图例也得是虚线,
+   用重复渐变画,不额外加元素 */
+#legend .sw.neg{
+  background:repeating-linear-gradient(90deg,
+    var(--neg) 0 5px, transparent 5px 9px);
+}
 
 /* ---------------- 底部 AI 输入栏 ---------------- */
 
@@ -414,7 +438,7 @@ label{display:block;color:var(--dim);font-size:12.5px;margin:14px 0 6px}
 }
 .btn.primary{background:var(--accent);border-color:var(--accent);
   color:#fff;font-weight:600}
-.btn.danger{background:transparent;border-color:transparent;color:var(--neg)}
+.btn.danger{background:transparent;border-color:transparent;color:var(--neg-ink)}
 .btn:active{opacity:.72}
 .btn:disabled{opacity:.45}
 .btn-row{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
@@ -427,7 +451,10 @@ input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent)}
   padding:3px 9px;border-radius:6px;font-size:11.5px;
   background:var(--bg-3);color:var(--text-2);margin:2px 4px 2px 0;
 }
-.tag.neg{color:var(--neg);background:color-mix(in srgb,var(--neg) 14%,transparent)}
+/* strengthTag() 一直在生成 class="tag pos",但这条规则以前不存在,
+   于是「+3 极亲近」和「0 中性」长得一模一样 —— 关系强度是这个 app 的核心数据。 */
+.tag.pos{color:var(--pos-ink);background:color-mix(in srgb,var(--pos) 14%,transparent)}
+.tag.neg{color:var(--neg-ink);background:color-mix(in srgb,var(--neg) 14%,transparent)}
 .tag.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
 
 .evidence{
@@ -442,6 +469,14 @@ input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent)}
 }
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
 .dimtext{color:var(--dim)}
+
+/* 只有这三个工具类,不再多开。
+   原则:布局用工具类,排版一律用组件类 —— 一旦开了 .mt-8 / .p-12 这种
+   一维原子类,等于把内联样式换个写法写回来,不解决任何问题。 */
+.grow{flex:1;min-width:0}
+.hstack{display:flex;align-items:center;gap:8px}
+.hstack.top{align-items:flex-start}
+.hstack.wrap{flex-wrap:wrap}
 
 body.masked .blurable{filter:blur(5px);user-select:none}
 body.masked .node .nm,body.masked .node .ini{opacity:.2 !important}

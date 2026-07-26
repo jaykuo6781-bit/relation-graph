@@ -185,6 +185,48 @@ def main():
     check("能查到邵一鸣和白宇航之间的故事", len(stories) >= 1,
           f"实际 {len(stories)} 条")
 
+    # ---------------- AI 摄取的去重(v6 修复) ----------------
+    print("\nAI 摄取:模糊匹配不该造出重复人物")
+    import llm
+    # 用独立圈子,别把人塞进公司圈 —— 后面的布局用例会核对「公司圈 19 人」
+    sandbox = db.create_circle("_摄取测试", "自定义")
+    db.upsert_person("张伟", dept="技术部", circle_id=sandbox)
+    zw = db.find_person_by_name("张伟")
+
+    before = len(db.list_people())
+    # 模拟:模型把「张伟」OCR 成「张玮」,_align 标为 fuzzy,人工选了「合并」
+    llm.commit({"persons": [{"name": "张玮", "dept": "", "title": "架构师",
+                             "matched_id": zw["id"], "matched_name": "张伟",
+                             "action": "merge", "accepted": True}],
+                "relations": [], "source": ""}, sandbox)
+    after = db.find_person_by_name("张伟")
+    check("合并后没有多出一个人", len(db.list_people()) == before,
+          f"人数 {before} → {len(db.list_people())}")
+    check("库里没有叫「张玮」的独立节点",
+          not any(p["name"] == "张玮" for p in db.list_people()))
+    check("空的部门不会把已有的「技术部」覆盖掉",
+          after["dept"] == "技术部", f"实际 {after['dept']!r}")
+    check("模型给的职位补上了", after["title"] == "架构师",
+          f"实际 {after['title']!r}")
+    check("模型用的写法被记成别名,下次走精确匹配",
+          "张玮" in (after["aliases"] or ""), f"实际 {after['aliases']!r}")
+    check("用别名能查到本人",
+          (db.find_person_by_name("张玮") or {}).get("id") == zw["id"])
+
+    # 匹配器本身:该松的松,该紧的紧
+    people_list = db.list_people()
+    m1, how1 = llm._match_person("张玮", people_list)
+    check("「张玮」能匹配到「张伟」(同姓、等长、只差一字)",
+          m1 is not None and m1["name"] == "张伟",
+          f"实际 {m1 and m1['name']}")
+    m2, how2 = llm._match_person("李明远", people_list)
+    check("「李明远」不会被误配到「李明远」以外的人",
+          m2 is None or m2["name"] == "李明远",
+          f"实际 {m2 and m2['name']}")
+
+    db.delete_circle(sandbox)          # 收拾干净,后面的用例不受影响
+    db.delete_person(zw["id"])
+
     # ---------------- 布局 ----------------
     print("\n布局引擎")
     for name, c in (("公司圈", company), ("同学圈", klass)):
