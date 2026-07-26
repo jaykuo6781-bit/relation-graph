@@ -144,7 +144,13 @@ async function boot() {
       $("#circleMenu").classList.add("hidden");
   });
 
-  $("#fitBtn").onclick = () => { closeSheets(); GraphView.fit(bottomInset()); };
+  // 复位 = 把拖过的球放回算法排的位置(拖动本就不持久化)+ 重新贴合视口
+  $("#fitBtn").onclick = () => {
+    closeSheets();
+    const restored = GraphView.resetPositions();
+    GraphView.fit(bottomInset());
+    if (restored) toast("已放回原来的位置");
+  };
   $("#themeBtn").onclick = toggleTheme;
   $("#facBtn").onclick = () => {
     S.byFaction = !S.byFaction;

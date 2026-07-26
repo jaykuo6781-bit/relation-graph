@@ -17,6 +17,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Windows 上一旦输出被重定向(管道、重定向到文件、SSH),Python 会退回
+# cp1252,遇到中文直接抛 UnicodeEncodeError —— 测试本身没问题,却看不到结果。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # 必须在 import config 之前设置 —— 全程用临时库
 _TMP_DB = Path(tempfile.gettempdir()) / "relgraph_selftest.db"
 for p in (_TMP_DB, Path(str(_TMP_DB) + "-wal"), Path(str(_TMP_DB) + "-shm")):

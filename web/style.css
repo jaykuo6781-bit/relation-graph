@@ -181,7 +181,12 @@ button{font-family:inherit;color:inherit}
   position:absolute;top:0;left:0;
   transform-origin:0 0;will-change:transform;backface-visibility:hidden;
 }
-#svg{display:block;--gscale:1}
+/* overflow:visible 是必须的,不是随手加的。
+   viewBox 是 "0 0 画布宽 画布高",而布局只保证节点的**圆心**落在画布内 ——
+   名字画在圆心两侧、光晕铺在圆外,都会越过这条线。SVG 最外层元素默认
+   overflow:hidden,于是靠边的名字被 SVG 自己裁掉(左边缘丢头一个字、
+   右边缘丢最后一个字)。真正该负责裁剪的是视口,也就是 #stage。 */
+#svg{display:block;--gscale:1;overflow:visible}
 
 /* ---- 连线:流光带 ----
    stroke 由 JS 写成渐变 url(),两端淡出、中间实,线就有了光带的收束感。 */
@@ -204,7 +209,7 @@ button{font-family:inherit;color:inherit}
 /* ---- 节点:发光的立体球 ----
    球身、亮边、高光三层叠出体积感;外面套一圈同色光晕。全是渐变填充,
    没有一处用 filter。 */
-.node{cursor:pointer}
+.node{cursor:grab}
 .node .glow,.node .spec,.node .rim{pointer-events:none}
 .node .rim{fill:none;stroke:#fff;stroke-opacity:.30;stroke-width:1.1}
 .node .spec{fill:#fff;opacity:.30;pointer-events:none}
@@ -230,8 +235,39 @@ button{font-family:inherit;color:inherit}
 #svg.focused .eg.near .elabel{opacity:1}
 .node.sel .rim{stroke-opacity:.95;stroke-width:2.2}
 
+/* ---- 悬停:Obsidian 那种"点亮一片"的感觉 ----
+   鼠标停在球上 → 它的亮边和光晕加强,它连出去的线全部亮起来并浮出关系文字,
+   邻居保持全亮,其余深深淡出。只在真有鼠标的设备上启用(JS 里查 hover:hover),
+   触屏上点一下就会卡住高亮。
+   淡出比选中态稍轻(.18 / .06),因为悬停是"扫一眼",不是"我要看这个"。 */
+#svg.hovering .node{opacity:.18;transition:opacity .16s ease}
+#svg.hovering .eg{opacity:.06;transition:opacity .16s ease}
+#svg.hovering .node.lit{opacity:1}
+#svg.hovering .eg.lit{opacity:1}
+#svg.hovering .eg.lit .elabel{opacity:1}
+
+/* 被指着的那一个:亮边加粗提亮 + 光晕放大。
+   光晕用 transform 放大而不是改 r —— 改属性会触发 SVG 重新计算几何,
+   transform 走合成层。transform-box:fill-box 让原点落在圆心上。 */
+.node.hot .rim{stroke-opacity:.95;stroke-width:2.4}
+.node.hot .spec{opacity:.5}
+.node.hot .glow{
+  transform:scale(1.2);transform-origin:center;transform-box:fill-box;
+  transition:transform .16s ease;
+}
+
+/* ---- 拖动中 ---- */
+.node.dragging{cursor:grabbing}
+.node.dragging .rim{stroke-opacity:1;stroke-width:2.6}
+.node.dragging .ball{
+  transform:scale(1.08);transform-origin:center;transform-box:fill-box;
+}
+/* 拖的时候一切过渡都关掉 —— 边跟着手走必须是即时的,慢半拍就"拖泥带水" */
+#svg.has-drag *{transition:none !important}
+
 @media (prefers-reduced-motion: reduce){
-  .edge,.elabel,#svg.focused .node,#svg.focused .eg{transition:none}
+  .edge,.elabel,#svg.focused .node,#svg.focused .eg,
+  #svg.hovering .node,#svg.hovering .eg,.node.hot .glow{transition:none}
 }
 
 .empty{

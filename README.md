@@ -230,6 +230,18 @@ python selftest.py
 
 测试跑在临时数据库上,不会碰你的真实数据。
 
+前端另有一份不依赖浏览器的检查(装了 Node 就能跑):
+
+```
+node fittest.js
+```
+
+它验的是**画面本身**:给定视口尺寸和一组节点(含超长名字、节点贴在画布四角),
+断言复位后每个名字的屏幕包围盒都落在视口内 —— 早先"复位后四周名字被裁"
+的 bug 就出在这里,而且是**两个独立原因**叠加(见 `web/style.css` 里
+`#svg{overflow:visible}` 上方的注释)。它还逐条核对前端手写的弧线数学
+与服务端 `layout._arc` 完全一致 —— 拖动节点时全靠前端这份重算路径。
+
 ---
 
 ## 技术选型
@@ -289,6 +301,7 @@ importer.py      批量导入解析器
 llm.py           模型调用(唯一与供应商相关的文件)
 config.py        配置与网络地址探测
 selftest.py      算法自检(含圈子隔离用例)
+fittest.js       前端自检:贴合视口 / 名字不被裁 / 弧线数学前后端一致
 make_icons.py    生成 PWA 图标
 setup-firewall.ps1  Windows:放行手机访问(仅限 Tailscale 网段)
 demo_seed.json   演示数据(虚构人名),兼作测试基准
