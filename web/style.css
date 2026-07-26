@@ -143,32 +143,34 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-/* 把整页钉死。index.html 里虽然写了 user-scalable=no,但 **iOS Safari 从
-   iOS 10 起就故意忽略它**(无障碍考虑),拦不住双指缩放和双击缩放 ——
-   真机上出现过整个页面被放大平移、顶栏左边的圈子名和整条底栏被挤出屏幕。
-   图谱自己的缩放在 #canvas 的 transform 上,和页面缩放是两回事。
+/* 关于 iOS 的页面缩放,记录一个我搞错过的事实:
+   **双指缩放平移的是「视觉视口」,不是「布局视口」** —— 所以给 html/body 写
+   position:fixed + overflow:hidden 对它完全无效(我试过,反而把 <html> 变成
+   固定定位这种非常规写法,引入了新问题)。
+   同理 viewport 里的 user-scalable=no 也没用:iOS 10 起就被故意忽略。
 
-   position:fixed + inset:0 让页面根本没有可滚动/可平移的区域;
-   touch-action:manipulation 关掉双击缩放(但保留单击和滚动)。 */
+   能做的只有两件:
+     · touch-action:manipulation 关掉**双击缩放**(这是最常见的误触来源),
+       但它不拦双指缩放 —— manipulation 等价于 pan-x pan-y pinch-zoom
+     · 图区自己用 touch-action:none 独占手势,双指在图上只会缩放图
+   页面被捏放大之后,只能靠用户自己捏回去。 */
 html,body{
   height:100%;margin:0;overscroll-behavior:none;
-  position:fixed;inset:0;overflow:hidden;
   touch-action:manipulation;
   -webkit-text-size-adjust:100%;   /* 横竖屏切换时 Safari 会自作主张放大字号 */
 }
-body{
-  background:var(--bg-0);color:var(--text);
-  font:var(--fs-body)/var(--lh-normal) -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",
-       "Hiragino Sans GB","Microsoft YaHei",sans-serif;
-  display:flex;flex-direction:column;
-  -webkit-font-smoothing:antialiased;
-}
-/* 可点的外壳元素统一关掉双击缩放和长按选词 —— 连点两个 tab 或者
-   手指在按钮上停顿一下,都不该触发浏览器行为。 */
-#topbar,#tabbar,#aibar,.sheet-head{
-  touch-action:manipulation;
+
+/* 按每块区域**实际需要**的手势逐个给,而不是一律 manipulation ——
+   manipulation 等价于 pan-x pan-y pinch-zoom,**它是允许双指缩放的**,
+   只挡双击。真正能挡住捏合的是 none(什么都不给)或 pan-y(只给纵向滚动)。
+
+   顶栏和底栏从不滚动 → none,双指落在这里不会缩放整页。
+   需要滚动的容器 → pan-y,纵向滚动照旧,但捏合被吃掉。 */
+#topbar,#tabbar,.sheet-head{
+  touch-action:none;
   -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
 }
+#aibar,.pad,.sheet-body,#circleMenu{touch-action:pan-y}
 
 .hidden{display:none !important}
 /* 属性形式的 hidden 也必须真的隐藏。UA 样式表里的 [hidden]{display:none} 特指度

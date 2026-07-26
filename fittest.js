@@ -262,18 +262,24 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
-console.log("\n整页不能被浏览器缩放/平移");
+console.log("\n页面缩放:能做的和做不到的");
 {
   /* iOS Safari 从 iOS 10 起故意忽略 user-scalable=no,所以只能靠 CSS 锁。
      真机上出现过整页被放大平移、顶栏的圈子名和整条底栏被挤出屏幕。 */
   const c = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  check("html,body 被固定,没有可平移的区域",
-        /html,body\{[^}]*position:fixed/.test(c) && /html,body\{[^}]*overflow:hidden/.test(c),
-        "光靠 viewport 的 user-scalable=no 在 iOS 上没用");
+  /* 我一开始给 html/body 写了 position:fixed + overflow:hidden 想锁住缩放 ——
+     **无效**:iOS 的双指缩放平移的是视觉视口,这两个属性只管布局视口。
+     而且把 <html> 变成固定定位是非常规写法,真机上引入了新的错位。已撤回。 */
+  check("没有给 html/body 写 position:fixed(对视觉视口无效,反而有副作用)",
+        !/html,body\{[^}]*position:fixed/.test(c));
   check("关掉双击缩放(touch-action:manipulation)",
         /html,body\{[^}]*touch-action:manipulation/.test(c));
-  check("顶栏/底栏/输入栏也关掉双击缩放",
-        /#topbar,#tabbar,#aibar[^{]*\{[^}]*touch-action:manipulation/.test(c));
+  /* manipulation 等价于 pan-x pan-y pinch-zoom —— **它允许双指缩放**,只挡双击。
+     我一开始以为它能挡住捏合,错了。能挡的是 none 或 pan-y。 */
+  check("顶栏底栏用 none(它们从不滚动,双指落这儿不该缩放整页)",
+        /#topbar,#tabbar[^{]*\{[^}]*touch-action:none/.test(c));
+  check("需要滚动的容器用 pan-y(纵向滚动照旧,捏合被吃掉)",
+        /#aibar,\.pad,\.sheet-body,#circleMenu\{touch-action:pan-y\}/.test(c));
   check("#stage 仍然是 touch-action:none(图谱要自己处理捏合)",
         /#stage\{[^}]*touch-action:none/.test(c),
         "改成 manipulation 的话图谱的双指缩放会被浏览器抢走");
