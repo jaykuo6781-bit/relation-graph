@@ -290,8 +290,11 @@ console.log("\n页面缩放:能做的和做不到的");
         /html,body\{[^}]*touch-action:manipulation/.test(c));
   /* manipulation 等价于 pan-x pan-y pinch-zoom —— **它允许双指缩放**,只挡双击。
      我一开始以为它能挡住捏合,错了。能挡的是 none 或 pan-y。 */
-  check("顶栏底栏用 none(它们从不滚动,双指落这儿不该缩放整页)",
-        /#topbar,#tabbar[^{]*\{[^}]*touch-action:none/.test(c));
+  /* 试过给顶栏底栏也设 none —— 结果整页没有一处还能捏合,页面被误缩放后
+     用户没有退路(iOS 拦不住缩放,只能靠用户自己捏回来)。留退路更重要。 */
+  check("顶栏底栏是 manipulation 而不是 none(要留一条能捏回来的路)",
+        /#topbar,#tabbar[^{]*\{[^}]*touch-action:manipulation/.test(c),
+        "全设 none 的话,页面一旦被误缩放就只能去 Safari 的 aA 菜单里改");
   check("需要滚动的容器用 pan-y(纵向滚动照旧,捏合被吃掉)",
         /#aibar,\.pad,\.sheet-body,#circleMenu\{touch-action:pan-y\}/.test(c));
   check("#stage 仍然是 touch-action:none(图谱要自己处理捏合)",
