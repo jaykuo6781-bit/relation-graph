@@ -183,15 +183,24 @@
      ::backdrop 那层压暗是最要紧的收益:深色 UI 里黑底上的黑阴影几乎不可见,
      以前卡片和背后的图糊在一起,层次全靠 1px 边框撑着。 -->
 <dialog id="sheet" class="sheet">
-  <div class="sheet-head">
-    <div class="sheet-grab" aria-hidden="true"></div>
-    <button class="close" id="sheetClose" aria-label="关闭">
-      <svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg>
-    </button>
+  <!-- dialog 本身铺满视口、透明、什么都不画,只当一个"把卡片顶到底部"的容器;
+       真正的卡片是里面这个 .sheet-card。
+
+       为什么要多这一层:直接给 dialog 写 bottom:0 时,iOS Safari 的固定定位
+       底边在浏览器工具栏**下面**,卡片有一大截藏在工具栏后面,只露出顶上一条。
+       改成容器用 100svh(small viewport height —— 浏览器工具栏展开时的高度,
+       也就是最小的那个),卡片再底对齐,底边就一定落在可见区里。 -->
+  <div class="sheet-card">
+    <div class="sheet-head">
+      <div class="sheet-grab" aria-hidden="true"></div>
+      <button class="close" id="sheetClose" aria-label="关闭">
+        <svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>
+    </div>
+    <!-- autofocus 落在滚动容器上:dialog 打开时会自动聚焦第一个可聚焦元素,
+         而 AI 审核卡片里第一个是复选框 —— 那会把内容直接滚过去。 -->
+    <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
   </div>
-  <!-- autofocus 落在滚动容器上:dialog 打开时会自动聚焦第一个可聚焦元素,
-       而 AI 审核卡片里第一个是复选框 —— 那会把内容直接滚过去。 -->
-  <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
 </dialog>
 
 <!-- 四个 tab 零 CSS 改动就装得下:#tabbar 是 flex、.navbtn 是 flex:1,

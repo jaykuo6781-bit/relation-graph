@@ -507,7 +507,8 @@ function openSheet(html, label) {
     // 而"人物卡里点一条关系 → 打开连线卡"正是在已开状态下调的
     sheetClosing = false;
     dlg.classList.remove("closing");
-    dlg.style.transform = "";
+    const card0 = dlg.querySelector(".sheet-card");
+    if (card0) card0.style.transform = "";
     dlg.showModal();
   }
 }
@@ -545,7 +546,8 @@ function bindSheet() {
   dlg.addEventListener("close", () => {
     sheetClosing = false;
     dlg.classList.remove("closing", "dragging");
-    dlg.style.transform = "";
+    const c = dlg.querySelector(".sheet-card");
+    if (c) c.style.transform = "";
     $("#sheetBody").innerHTML = "";
     GraphView.focus(null);
   });
@@ -557,6 +559,7 @@ function bindSheet() {
 
   /* 把手以前画了个可拖的样子却什么都不做 —— 比没有更糟。真绑上。
      只写 transform,走合成层。 */
+  const card = dlg.querySelector(".sheet-card");
   const head = dlg.querySelector(".sheet-head");
   let y0 = 0, dy = 0, on = false;
   head.addEventListener("touchstart", e => {
@@ -567,14 +570,14 @@ function bindSheet() {
   head.addEventListener("touchmove", e => {
     if (!on) return;
     dy = Math.max(0, e.touches[0].clientY - y0);   // 只能往下拉
-    dlg.style.transform = `translateY(${dy}px)`;
+    card.style.transform = `translateY(${dy}px)`;
   }, { passive: true });
   head.addEventListener("touchend", () => {
     if (!on) return;
     on = false;
     dlg.classList.remove("dragging");
     if (dy > 90) return closeSheets();
-    dlg.style.transform = "";                      // 没拉够,弹回去
+    card.style.transform = "";                     // 没拉够,弹回去
   });
 }
 

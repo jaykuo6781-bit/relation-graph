@@ -262,6 +262,28 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
+console.log("\n卡片在 iOS 上不能被工具栏吃掉");
+{
+  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+  /* 直接给 dialog 写 bottom:0 时,iOS Safari 的固定定位底边在浏览器工具栏
+     **下面** —— 卡片一大截藏在工具栏后,只露出顶上一条(真机上复现过)。 */
+  check("dialog 是铺满视口的容器,卡片是内层 .sheet-card",
+        /<div class="sheet-card">/.test(html));
+  check("容器高度用 svh 而不是 dvh/bottom:0",
+        /\.sheet\{[^}]*height:100svh/.test(css),
+        "svh 是浏览器工具栏展开时的视口高度,也就是最小的那个");
+  check("有 svh 不支持时的回退(iOS 15.4 没有 svh)",
+        /@supports not \(height: 100svh\)/.test(css));
+  check("容器把卡片顶到底边",
+        /\.sheet\{[^}]*justify-content:flex-end/.test(css));
+  check("卡片自己不再固定定位(定位交给容器)",
+        !/\.sheet-card\{[^}]*position:fixed/.test(css));
+  check("拖动写的是卡片的 transform,不是容器的",
+        /card\.style\.transform = `translateY/.test(appjs));
+  check("动画挂在卡片上", /\.sheet\[open\] \.sheet-card\{animation:rise/.test(css));
+}
+
 console.log("\n交叉复核抓到的四处接缝(修完要守住)");
 {
   const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
@@ -329,8 +351,8 @@ console.log("\n卡片迁到原生 <dialog>");
   check("::backdrop 有压暗(深色下卡片和背景分层全靠它)",
         /\.sheet::backdrop\{[^}]*background/.test(css));
   check("深色下有顶缘高光线,浅色下关掉",
-        /\.sheet::before\{/.test(css) &&
-        /\[data-theme="light"\] \.sheet::before\{display:none\}/.test(css));
+        /\.sheet-card::before\{/.test(css) &&
+        /\[data-theme="light"\] \.sheet-card::before\{display:none\}/.test(css));
   check("滚动容器有 overscroll-behavior:contain(否则滚到底会带动整页)",
         /\.sheet-body\{[^}]*overscroll-behavior:contain/.test(css));
 
