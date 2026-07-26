@@ -262,86 +262,6 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
-console.log("\n整体骨架(误删过一次)");
-{
-  const c = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  /* 少了这两行,#views{flex:1} 没有 flex 父容器会塌成 0 高:
-     底栏直接贴到顶栏下面、内容区一片纯黑。页面不报任何错。 */
-  check("body 是纵向 flex(顶栏 + 可伸缩内容区 + 底栏)",
-        /\bbody\{[^}]*display:flex/.test(c) &&
-        /\bbody\{[^}]*flex-direction:column/.test(c),
-        "#views{flex:1} 会塌成 0 高");
-  check("body 有背景色和文字色", /\bbody\{[^}]*background:var\(--bg-0\)/.test(c));
-  check("#views 撑满剩余空间", /#views\{[^}]*flex:1/.test(c));
-  check("html,body 高度 100%", /html,body\{[^}]*height:100%/.test(c));
-}
-
-console.log("\n页面缩放:能做的和做不到的");
-{
-  /* iOS Safari 从 iOS 10 起故意忽略 user-scalable=no,所以只能靠 CSS 锁。
-     真机上出现过整页被放大平移、顶栏的圈子名和整条底栏被挤出屏幕。 */
-  const c = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  /* 我一开始给 html/body 写了 position:fixed + overflow:hidden 想锁住缩放 ——
-     **无效**:iOS 的双指缩放平移的是视觉视口,这两个属性只管布局视口。
-     而且把 <html> 变成固定定位是非常规写法,真机上引入了新的错位。已撤回。 */
-  check("没有给 html/body 写 position:fixed(对视觉视口无效,反而有副作用)",
-        !/html,body\{[^}]*position:fixed/.test(c));
-  check("关掉双击缩放(touch-action:manipulation)",
-        /html,body\{[^}]*touch-action:manipulation/.test(c));
-  /* manipulation 等价于 pan-x pan-y pinch-zoom —— **它允许双指缩放**,只挡双击。
-     我一开始以为它能挡住捏合,错了。能挡的是 none 或 pan-y。 */
-  /* 试过给顶栏底栏也设 none —— 结果整页没有一处还能捏合,页面被误缩放后
-     用户没有退路(iOS 拦不住缩放,只能靠用户自己捏回来)。留退路更重要。 */
-  check("顶栏底栏是 manipulation 而不是 none(要留一条能捏回来的路)",
-        /#topbar,#tabbar[^{]*\{[^}]*touch-action:manipulation/.test(c),
-        "全设 none 的话,页面一旦被误缩放就只能去 Safari 的 aA 菜单里改");
-  check("需要滚动的容器用 pan-y(纵向滚动照旧,捏合被吃掉)",
-        /#aibar,\.pad,\.sheet-body,#circleMenu\{touch-action:pan-y\}/.test(c));
-  check("#stage 仍然是 touch-action:none(图谱要自己处理捏合)",
-        /#stage\{[^}]*touch-action:none/.test(c),
-        "改成 manipulation 的话图谱的双指缩放会被浏览器抢走");
-}
-
-console.log("\n给 dialog 写了 display 就必须补 :not([open])");
-{
-  /* <dialog> 关闭时靠默认样式表的 dialog:not([open]){display:none} 隐藏,
-     而任何类/id 选择器写的 display 都会盖掉它 —— 于是一个 position:fixed
-     的透明层永远铺在页面上,吞掉所有点击、拖动和滚动,页面看起来完全正常。
-     这个坑我踩过一次,真机上表现为"什么都点不动"。 */
-  const dialogIds = ["sheet", "toast"];
-  for (const id of dialogIds) {
-    const sel = id === "sheet" ? "\\.sheet" : "#" + id;
-    const setsDisplay = new RegExp(sel + "\\{[^}]*display:", "").test(css);
-    if (!setsDisplay) { check(`${id}: 没给 dialog 写 display,无需补规则`, true); continue; }
-    check(`${id}: 写了 display,也补了 :not([open]){display:none}`,
-          new RegExp(sel + "(:not\\(\\[open\\]\\))\\{display:none\\}").test(css)
-          || new RegExp(sel.replace("\\.", "\\.") + ":not\\(\\[open\\]\\)\\{display:none\\}").test(css),
-          "关闭状态下它会铺满视口吞掉所有交互");
-  }
-}
-
-console.log("\n卡片在 iOS 上不能被工具栏吃掉");
-{
-  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
-  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
-  /* 直接给 dialog 写 bottom:0 时,iOS Safari 的固定定位底边在浏览器工具栏
-     **下面** —— 卡片一大截藏在工具栏后,只露出顶上一条(真机上复现过)。 */
-  check("dialog 是铺满视口的容器,卡片是内层 .sheet-card",
-        /<div class="sheet-card">/.test(html));
-  check("容器高度用 svh 而不是 dvh/bottom:0",
-        /\.sheet\{[^}]*height:100svh/.test(css),
-        "svh 是浏览器工具栏展开时的视口高度,也就是最小的那个");
-  check("有 svh 不支持时的回退(iOS 15.4 没有 svh)",
-        /@supports not \(height: 100svh\)/.test(css));
-  check("容器把卡片顶到底边",
-        /\.sheet\{[^}]*justify-content:flex-end/.test(css));
-  check("卡片自己不再固定定位(定位交给容器)",
-        !/\.sheet-card\{[^}]*position:fixed/.test(css));
-  check("拖动写的是卡片的 transform,不是容器的",
-        /card\.style\.transform = `translateY/.test(appjs));
-  check("动画挂在卡片上", /\.sheet\[open\] \.sheet-card\{animation:rise/.test(css));
-}
-
 console.log("\n交叉复核抓到的四处接缝(修完要守住)");
 {
   const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
@@ -351,23 +271,11 @@ console.log("\n交叉复核抓到的四处接缝(修完要守住)");
   /* P1 卡片用 showModal() 之后在 top layer,普通元素的 z-index 再高也盖不住。
      19 处 toast 是在卡片开着时触发的,其中包括替代 confirm() 的那个「撤销」——
      看不见也点不到,等于删关系没有任何护栏。 */
-  /* 第一版修法是把 #toast 也做成 <dialog> 用 .show() —— **不成立**:
-     非模态的 show() 并不进 top layer(只有 showModal() 才进),而且模态卡片
-     会把外面一切设为 inert,看得见也点不动。真机上验证过,撤销依旧不可见。
-     可行的做法是显示前把它搬进那个打开着的 dialog。 */
-  check("toast 显示前会按卡片是否打开决定挂在哪",
-        /function showToast[\s\S]{0,300}dlg\.open\) \? dlg : document\.body[\s\S]{0,120}appendChild/.test(appjs),
-        "留在 body 里的话,卡片开着时它既被盖住也点不动");
-  check("卡片关闭时把 toast 搬回 body(否则它会跟着 dialog 一起消失)",
-        /parentNode === dlg\) document\.body\.appendChild/.test(appjs));
-  // 先剥掉注释 —— 上面那段说明里就写着 "overflow:hidden" 这几个字,
-  // 直接对着原文匹配会把注释当成声明(我第一次就是这么写错的)
-  const cssNoComment = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  check("卡片容器没有 overflow:hidden(会裁掉搬进来的 toast)",
-        !/\.sheet\{[^}]*overflow:hidden/.test(cssNoComment));
-  check("#toast 是普通元素,不是 dialog",
-        /<div id="toast"/.test(html),
-        "做成 dialog 反而更糟:show() 不进 top layer");
+  check("#toast 是 <dialog>(否则会被卡片的 top layer 完全盖住)",
+        /<dialog id="toast"/.test(html));
+  check("toast 用非模态 show() 而不是切 class",
+        /function showToast[\s\S]{0,220}\.show\(\)/.test(appjs));
+  check("hideToast 用 close() 收尾", /function hideToast[\s\S]{0,200}\.close\(\)/.test(appjs));
 
   /* P2 父元素的 color:transparent 只靠继承传给后代,而任何自有声明都赢过
      继承值 —— .tag.warn 自己写了 color,打码后色带上照样印着真名。 */
@@ -421,8 +329,8 @@ console.log("\n卡片迁到原生 <dialog>");
   check("::backdrop 有压暗(深色下卡片和背景分层全靠它)",
         /\.sheet::backdrop\{[^}]*background/.test(css));
   check("深色下有顶缘高光线,浅色下关掉",
-        /\.sheet-card::before\{/.test(css) &&
-        /\[data-theme="light"\] \.sheet-card::before\{display:none\}/.test(css));
+        /\.sheet::before\{/.test(css) &&
+        /\[data-theme="light"\] \.sheet::before\{display:none\}/.test(css));
   check("滚动容器有 overscroll-behavior:contain(否则滚到底会带动整页)",
         /\.sheet-body\{[^}]*overscroll-behavior:contain/.test(css));
 

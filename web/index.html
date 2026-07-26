@@ -183,24 +183,15 @@
      ::backdrop 那层压暗是最要紧的收益:深色 UI 里黑底上的黑阴影几乎不可见,
      以前卡片和背后的图糊在一起,层次全靠 1px 边框撑着。 -->
 <dialog id="sheet" class="sheet">
-  <!-- dialog 本身铺满视口、透明、什么都不画,只当一个"把卡片顶到底部"的容器;
-       真正的卡片是里面这个 .sheet-card。
-
-       为什么要多这一层:直接给 dialog 写 bottom:0 时,iOS Safari 的固定定位
-       底边在浏览器工具栏**下面**,卡片有一大截藏在工具栏后面,只露出顶上一条。
-       改成容器用 100svh(small viewport height —— 浏览器工具栏展开时的高度,
-       也就是最小的那个),卡片再底对齐,底边就一定落在可见区里。 -->
-  <div class="sheet-card">
-    <div class="sheet-head">
-      <div class="sheet-grab" aria-hidden="true"></div>
-      <button class="close" id="sheetClose" aria-label="关闭">
-        <svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg>
-      </button>
-    </div>
-    <!-- autofocus 落在滚动容器上:dialog 打开时会自动聚焦第一个可聚焦元素,
-         而 AI 审核卡片里第一个是复选框 —— 那会把内容直接滚过去。 -->
-    <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
+  <div class="sheet-head">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <button class="close" id="sheetClose" aria-label="关闭">
+      <svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
   </div>
+  <!-- autofocus 落在滚动容器上:dialog 打开时会自动聚焦第一个可聚焦元素,
+       而 AI 审核卡片里第一个是复选框 —— 那会把内容直接滚过去。 -->
+  <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
 </dialog>
 
 <!-- 四个 tab 零 CSS 改动就装得下:#tabbar 是 flex、.navbtn 是 flex:1,
@@ -218,15 +209,11 @@
     <svg class="ic lg" aria-hidden="true"><use href="#i-gear"/></svg><span>设置</span></button>
 </nav>
 
-<!-- 卡片用 showModal() 之后在 top layer,普通元素的 z-index 再高也盖不住,
-     而 19 处 toast 是在卡片开着时触发的(含替代 confirm() 的那个「撤销」)。
-
-     试过把它也做成 <dialog> 用 .show() —— 不行:**非模态的 show() 并不进
-     top layer**,只有 showModal() 才进;而且模态卡片会把外面一切设为 inert,
-     看得见也点不动。
-     可行的办法是把它**搬进**打开着的那个 dialog 里(见 app.js 的 showToast):
-     模态 dialog 内部的元素既显示也可交互。 -->
-<div id="toast" class="hidden" role="status" aria-live="polite"></div>
+<!-- 必须是 <dialog>:卡片用 showModal() 之后在 top layer,普通元素的
+     z-index 再高也盖不住它 —— 而 19 处 toast 是在卡片开着时触发的,
+     其中包括替代 confirm() 的那个「撤销」。非模态的 .show() 同样进
+     top layer,但不抢焦点、不加遮罩、不拦背后的点击。 -->
+<dialog id="toast" aria-live="polite"></dialog>
 <div id="busy" class="hidden"><div class="box"></div></div>
 
 <script src="/graph.js"></script>

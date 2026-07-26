@@ -98,15 +98,8 @@ let undoAction = null;          // 「撤销」toast 上挂着的那个动作
 
 /* 非模态 show():同样进 top layer(所以能盖住 showModal 的卡片),
    但不抢焦点、不加遮罩、不拦背后的点击。重复 show() 会抛,先判 open。 */
-/* 卡片开着时把 toast 搬进那个 dialog 里再显示。
-   模态 dialog 在 top layer,外面的一切被设为 inert —— 留在 body 里的 toast
-   既被盖住也点不动,而「撤销」是必须能点的。
-   (非模态的 dialog.show() 不进 top layer,那条路走不通。) */
 function showToast(t) {
-  const dlg = document.getElementById("sheet");
-  const host = (dlg && dlg.open) ? dlg : document.body;
-  if (t.parentNode !== host) host.appendChild(t);
-  t.classList.remove("hidden");
+  if (!t.open) { try { t.show(); } catch (e) { t.setAttribute("open", ""); } }
 }
 
 function toast(msg) {
@@ -135,7 +128,8 @@ function toastUndo(msg, undo) {
 
 function hideToast() {
   undoAction = null;
-  $("#toast").classList.add("hidden");
+  const t = $("#toast");
+  if (t.open) t.close(); else t.removeAttribute("open");
 }
 
 /* 把一个 async 事件处理器包起来,失败时给出人话提示。
@@ -513,8 +507,7 @@ function openSheet(html, label) {
     // 而"人物卡里点一条关系 → 打开连线卡"正是在已开状态下调的
     sheetClosing = false;
     dlg.classList.remove("closing");
-    const card0 = dlg.querySelector(".sheet-card");
-    if (card0) card0.style.transform = "";
+    dlg.style.transform = "";
     dlg.showModal();
   }
 }
@@ -552,11 +545,7 @@ function bindSheet() {
   dlg.addEventListener("close", () => {
     sheetClosing = false;
     dlg.classList.remove("closing", "dragging");
-    const c = dlg.querySelector(".sheet-card");
-    if (c) c.style.transform = "";
-    // toast 可能被搬进了这个 dialog,卡片一关它会跟着消失 —— 搬回去
-    const tst = document.getElementById("toast");
-    if (tst && tst.parentNode === dlg) document.body.appendChild(tst);
+    dlg.style.transform = "";
     $("#sheetBody").innerHTML = "";
     GraphView.focus(null);
   });
@@ -568,7 +557,6 @@ function bindSheet() {
 
   /* 把手以前画了个可拖的样子却什么都不做 —— 比没有更糟。真绑上。
      只写 transform,走合成层。 */
-  const card = dlg.querySelector(".sheet-card");
   const head = dlg.querySelector(".sheet-head");
   let y0 = 0, dy = 0, on = false;
   head.addEventListener("touchstart", e => {
@@ -579,14 +567,14 @@ function bindSheet() {
   head.addEventListener("touchmove", e => {
     if (!on) return;
     dy = Math.max(0, e.touches[0].clientY - y0);   // 只能往下拉
-    card.style.transform = `translateY(${dy}px)`;
+    dlg.style.transform = `translateY(${dy}px)`;
   }, { passive: true });
   head.addEventListener("touchend", () => {
     if (!on) return;
     on = false;
     dlg.classList.remove("dragging");
     if (dy > 90) return closeSheets();
-    card.style.transform = "";                     // 没拉够,弹回去
+    dlg.style.transform = "";                      // 没拉够,弹回去
   });
 }
 

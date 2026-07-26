@@ -143,50 +143,14 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-/* 关于 iOS 的页面缩放,记录一个我搞错过的事实:
-   **双指缩放平移的是「视觉视口」,不是「布局视口」** —— 所以给 html/body 写
-   position:fixed + overflow:hidden 对它完全无效(我试过,反而把 <html> 变成
-   固定定位这种非常规写法,引入了新问题)。
-   同理 viewport 里的 user-scalable=no 也没用:iOS 10 起就被故意忽略。
-
-   能做的只有两件:
-     · touch-action:manipulation 关掉**双击缩放**(这是最常见的误触来源),
-       但它不拦双指缩放 —— manipulation 等价于 pan-x pan-y pinch-zoom
-     · 图区自己用 touch-action:none 独占手势,双指在图上只会缩放图
-   页面被捏放大之后,只能靠用户自己捏回去。 */
-html,body{
-  height:100%;margin:0;overscroll-behavior:none;
-  touch-action:manipulation;
-  -webkit-text-size-adjust:100%;   /* 横竖屏切换时 Safari 会自作主张放大字号 */
-}
-
+html,body{height:100%;margin:0;overscroll-behavior:none}
 body{
   background:var(--bg-0);color:var(--text);
   font:var(--fs-body)/var(--lh-normal) -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",
        "Hiragino Sans GB","Microsoft YaHei",sans-serif;
-  /* 整个应用是"顶栏 + 可伸缩内容区 + 底栏"的纵向 flex。
-     少了这两行,#views{flex:1} 就没有 flex 父容器,会塌成 0 高 ——
-     表现是底栏直接贴到顶栏下面、下面一片纯黑。(我误删过一次。) */
   display:flex;flex-direction:column;
   -webkit-font-smoothing:antialiased;
 }
-
-/* 按每块区域**实际需要**的手势逐个给,而不是一律 manipulation ——
-   manipulation 等价于 pan-x pan-y pinch-zoom,**它是允许双指缩放的**,
-   只挡双击。真正能挡住捏合的是 none(什么都不给)或 pan-y(只给纵向滚动)。
-
-   **但不能到处都 none。** 我试过给顶栏底栏也设 none,结果是整个页面
-   没有一处还能捏合 —— 页面一旦被误缩放(iOS 拦不住,见上),用户就**没有
-   退路**,只能去地址栏的 aA 菜单里改缩放百分比。留一条能捏回来的路
-   比堵死所有入口重要。
-   所以:顶栏底栏用 manipulation(挡双击、留捏合),真正需要独占手势的
-   只有图区(它自己处理捏合)和需要纵向滚动的容器。 */
-#topbar,#tabbar,.sheet-head{
-  touch-action:manipulation;
-  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
-}
-#aibar,.pad,.sheet-body,#circleMenu{touch-action:pan-y}
-
 .hidden{display:none !important}
 /* 属性形式的 hidden 也必须真的隐藏。UA 样式表里的 [hidden]{display:none} 特指度
    是 (0,1,0),而 .row 自己写着 display:flex —— 后者赢,元素照样显示。
@@ -519,32 +483,11 @@ button{font-family:inherit;color:inherit}
 
 /* ---------------- 卡片(原生 dialog) ---------------- */
 
-/* dialog 只当容器:铺满视口、透明、不画任何东西,把卡片顶到底边。
-   高度用 100svh —— small viewport height 是"浏览器工具栏展开时"的视口高度,
-   也就是最小的那个。用 dvh 或 bottom:0 时,iOS Safari 的固定定位底边落在
-   工具栏**下面**,卡片有一大截藏在工具栏后面,只露出顶上一条。 */
 .sheet{
-  position:fixed;inset:0;margin:0;padding:0;border:0;
-  width:100%;max-width:none;height:100svh;max-height:100svh;
-  background:transparent;box-shadow:none;
-  /* 不能 overflow:hidden —— 卡片开着时 #toast 会被搬进来,裁掉就等于
-     回到「看不见」的老问题 */
-  display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
-}
-/* ⚠ 这一条不能少。<dialog> 关闭时是靠浏览器默认样式表里的
-   `dialog:not([open]){display:none}` 隐藏的,而上面那句 display:flex
-   是类选择器 —— 优先级高于默认样式表,会把它盖掉。后果:一个
-   position:fixed;inset:0 的透明层永远铺在整个页面上,吞掉所有点击、
-   拖动和滚动,而且看不出来。
-   凡是给 dialog 写了 display 的地方,都必须补这一条(#toast 同理)。 */
-.sheet:not([open]){display:none}
-
-@supports not (height: 100svh){        /* iOS 15.4 没有 svh,退回 -webkit-fill-available */
-  .sheet{height:-webkit-fill-available;max-height:-webkit-fill-available}
-}
-
-.sheet-card{
-  position:relative;width:100%;max-width:600px;max-height:82%;
+  /* UA 默认给 dialog 的 width:fit-content / max-width:calc(100%-6px-2em) /
+     margin:auto / border / padding 必须全部显式清掉,否则布局会莫名其妙 */
+  position:fixed;inset:auto 0 0 0;margin:0 auto;padding:0;
+  width:100%;max-width:600px;max-height:82dvh;
   display:flex;flex-direction:column;overflow:hidden;
   background:var(--bg-1);color:var(--text);
   border:1px solid var(--line);border-bottom:0;
@@ -557,16 +500,19 @@ button{font-family:inherit;color:inherit}
    ② 顶缘一道 1px 高光,模拟光从上方来 —— 深色 UI 分层的主力
    ③ 表面比背景亮一档(--bg-1 > --bg-0)
    浅色下反过来:高光线没意义,--shadow 才是主力,所以 ① ② 只在深色生效。 */
-.sheet-card::before{
+.sheet::before{
   content:"";position:absolute;left:0;right:0;top:0;height:1px;z-index:2;
   background:linear-gradient(90deg,transparent,rgba(255,255,255,.16) 22%,
              rgba(255,255,255,.16) 78%,transparent);
   pointer-events:none;
 }
-:root[data-theme="light"] .sheet-card::before{display:none}
+:root[data-theme="light"] .sheet::before{display:none}
 .sheet::backdrop{background:rgba(4,6,14,.58)}
 :root[data-theme="light"] .sheet::backdrop{background:rgba(20,25,45,.28)}
 
+/* 关闭按钮和把手固定在顶部。以前它们在滚动容器里,人物卡片内容很长,
+   往下滚两屏 ✕ 就消失了,而这个卡片当时既没有遮罩也没有 Esc —— 
+   想关掉只能一路滚回顶部。 */
 .sheet-head{
   position:relative;flex:none;padding:var(--sp-2) var(--sp-4) 0;
   background:var(--bg-1);z-index:1;
@@ -592,17 +538,17 @@ button{font-family:inherit;color:inherit}
 /* 入场 / 退场。退场在 Safari 17.5 以下不能靠 @starting-style + allow-discrete,
    所以用"加 .closing → 等 animationend → 真 close()"这个全版本可用的老办法。
    以前只有入场没有退场,卡片是瞬间消失的 —— 那种不对称很容易被读作"没做完"。 */
-.sheet[open] .sheet-card{animation:rise .22s cubic-bezier(.2,.8,.3,1)}
+.sheet[open]{animation:rise .22s cubic-bezier(.2,.8,.3,1)}
 .sheet[open]::backdrop{animation:fadein .22s ease}
-.sheet.closing .sheet-card{animation:sink .16s ease-in forwards}
+.sheet.closing{animation:sink .16s ease-in forwards}
 .sheet.closing::backdrop{animation:fadeout .16s ease forwards}
 @keyframes rise{from{transform:translateY(28px);opacity:0}to{transform:none;opacity:1}}
 @keyframes sink{to{transform:translateY(28px);opacity:0}}
 @keyframes fadein{from{opacity:0}to{opacity:1}}
 @keyframes fadeout{to{opacity:0}}
-.sheet.dragging .sheet-card{animation:none;transition:none}
+.sheet.dragging{animation:none;transition:none}
 @media (prefers-reduced-motion: reduce){
-  .sheet[open] .sheet-card,.sheet.closing .sheet-card,
+  .sheet[open],.sheet.closing,
   .sheet[open]::backdrop,.sheet.closing::backdrop{animation:none}
 }
 
@@ -848,14 +794,17 @@ body.masked #svg .node .nm{stroke:var(--text)}
 body.masked #svg .node .ini{stroke:var(--node-ink)}
 body.masked #svg .elabel{stroke:var(--text)}
 
+/* UA 默认给 dialog 的 margin/border/padding 要清掉。
+   不设 ::backdrop —— 非模态 dialog 本来就没有。 */
 #toast{
   position:fixed;left:50%;bottom:calc(104px + var(--safe-b));right:auto;top:auto;
-  transform:translateX(-50%);z-index:100;
+  transform:translateX(-50%);margin:0;border:0;
   background:var(--text);color:var(--bg-0);font-weight:var(--fw-med);
   padding:9px 17px;border-radius:var(--r-md);font-size:var(--fs-small);
   box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:86vw;width:max-content;
   text-align:center;
 }
+#toast:not([open]){display:none}
 #toast b{text-decoration:underline;text-underline-offset:2px}
 #busy{
   position:fixed;inset:0;z-index:90;display:flex;
@@ -885,9 +834,9 @@ body.masked #svg .elabel{stroke:var(--text)}
   #tabbar{justify-content:center;gap:8px}
   .navbtn{flex:0 0 130px}
   #legend{left:22px}
-  .sheet{padding-bottom:var(--sp-4)}
-  .sheet-card{
+  .sheet{
+    inset:auto 0 var(--sp-4) 0;
     border-radius:var(--r-2xl);border-bottom:1px solid var(--line);
-    max-height:76%;
+    max-height:76dvh;
   }
 }
