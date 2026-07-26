@@ -207,6 +207,38 @@ check("双击文件打开时,主界面会给出明确提示",
 check("双击文件打开时,对比页会给出明确提示",
       cmp.includes('location.protocol === "file:"'));
 
+console.log("\n设计 token 体系(防止改回散装数值)");
+/* 这几条不是"风格洁癖"。半像素字号在 Windows 上会被字体舍入,
+   造成"看起来没对齐但说不出哪里不对";而 --fs-form 低于 16px 会让
+   iOS Safari 在聚焦输入框时强制放大整页 —— 那是功能性 bug。 */
+{
+  const decl = [...css.matchAll(/font-size:\s*([0-9.]+)px/g)].map(m => m[1]);
+  const halves = decl.filter(v => !Number.isInteger(+v));
+  check(`没有半像素字号(发现 ${halves.length} 处)`, halves.length === 0,
+        "散装的 11.5/12.5/13.5 又回来了:" + halves.join(", "));
+
+  const m = css.match(/--fs-form:\s*(\d+)px/);
+  check("--fs-form 是 16px(低于它 iOS 聚焦输入框会放大整页)",
+        m && +m[1] >= 16, m ? `实际 ${m[1]}px` : "token 不见了");
+
+  check("AI 输入框用的是 --fs-form,不是别的档",
+        /#aiInput\{[^}]*font:\s*var\(--fs-form\)/.test(css),
+        "它是全 app 最常用的输入框,字号一低就会触发 iOS 缩放");
+
+  check("字重里没有 650(PingFang/YaHei 没有这一字面,和 600 渲染完全一致)",
+        !/font-weight:\s*650/.test(css));
+
+  // 只看规则体,不看 :root 里的 token 声明本身(--r-pill:999px 是定义不是用法)
+  const rules = css.slice(css.indexOf("*{box-sizing"));
+  const radii = [...rules.matchAll(/border-radius:\s*([0-9]+)px/g)].map(m => m[1]);
+  check(`圆角都走 token(还剩 ${radii.length} 个裸值)`, radii.length === 0,
+        "裸圆角:" + radii.join(", "));
+
+  check(".icon-btn 的热区至少 40×40",
+        /\.icon-btn\{[^}]*width:40px[^}]*height:40px/.test(css),
+        "顶栏按钮以前是 34×28,手机上很容易点错旁边那个");
+}
+
 console.log("\n" + "=".repeat(52));
 console.log(`  通过 ${ok} / 失败 ${fail}`);
 console.log("=".repeat(52));
