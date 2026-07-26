@@ -9,6 +9,11 @@
   3. key_people         关键人物(Brandes 中介中心性)
      intro_path         引荐路径(Dijkstra 最短路)
   4. unstable_triangles 不稳定三角(海德结构平衡理论)
+
+两个汇总入口:brief(一个人的一屏简报)、situation(整个圈子的局势)。
+它们都把自己那份 build_graph 结果用 g= 传给下面的算法 —— 每个算法各建
+各的图的话,一次 brief 会跑 5 遍 build_graph、局势页会跑 4 遍加 2 遍
+Brandes。所有算法的 g 都是**尾部可选参数**,不传就自己建,老调用零改动。
 """
 
 import heapq
@@ -157,25 +162,49 @@ def _direction_penalty(g, u, v):
 #  1. 找敌人的敌人
 # ============================================================
 
-def enemies_of_enemy(target_id, me_id=None, limit=30, circle_id=None):
+def enemies_of_enemy(target_id, me_id=None, limit=30, circle_id=None, g=None):
     """给定目标 X,列出与 X 有矛盾、且我拉拢得动的人。
 
-    评分 = 矛盾烈度 × 可拉拢度
+    score = 100 × conflict_n × reach_n × (0.70 + 0.20×clout_n + 0.10×(1-risk_n))
 
-    矛盾烈度 conflict:  1..3,来自 Y 与 X 的负向权重
-    可拉拢度 affinity:  我与 Y 的直接关系 + 共同好友带来的间接可达性
-                        为负说明 Y 跟我也不对付,分数会被压下去
+      conflict_n = conflict / 3          (0,1]  他跟目标的矛盾有多深
+      reach_n    = (affinity+3) / 7.5    [0,1]  我够不够得着他
+      clout_n    = 中介中心性归一化      [0,1]  他说话有多少分量
+      risk_n     = min(1, 他跟我朋友们结的仇 / 6)  拉他会得罪自己人吗
 
-    score = conflict × (3 + affinity),affinity=-3 时归零,
-    也就是"我的敌人的敌人"不会被推荐 —— 这是对的,他不会帮我。
+    **为什么要换掉老的 `conflict × (3+affinity)`**:老公式的两个因子都是
+    小整数(conflict 只有 1/2/3,affinity 多数时候是 0),乘出来的取值高度
+    离散 —— 演示数据外的真实圈子里,常常六七个人分数一模一样。而
+    `results.sort` 是稳定排序,同分时保留的是字典插入序,也就是**录入顺序**,
+    可 UI 上它被呈现成"第一人选"。这是拿录入先后冒充判断,是误导。
+
+    clout_n 是全式子里**唯一连续**的一项:它既把"谁更有份量"这个真实维度
+    引进来,又顺手把同分打散了。risk_n 只占 10%,是修正项不是主项 ——
+    "拉他会得罪我自己的朋友"值得扣分,但不该盖过"他跟目标矛盾有多深"。
+
+    值域固定 0~100,可以当百分比直接讲给人听。
+
+    **零点性质必须保住**:affinity == -3(我跟他也势不两立)→ reach_n == 0
+    → 得 0 分。"我的敌人的敌人"如果同时也是我的死敌,他不会帮我 ——
+    老公式靠 (3+affinity) 归零,新公式靠 reach_n 归零,含义完全一致。
+
+    排序是显式全序 (-score, -conflict, -affinity, id),不依赖排序的稳定性,
+    也就不再受录入顺序影响。
     """
-    g = build_graph(circle_id)
+    if g is None:
+        g = build_graph(circle_id)
     if target_id not in g["people"]:
         return {"error": "找不到这个人"}
 
     me = db.get_me()
     if me_id is None and me:
         me_id = me["id"]
+
+    # 中介中心性挂在 g 上缓存:局势页把同一个 g 传给好几个算法,
+    # Brandes 只会跑一次
+    bt = _betweenness(g)
+    mx_bt = max(bt.values()) if bt else 0.0
+    my_friends = set(g["pos_adj"].get(me_id, {})) if me_id else set()
 
     results = []
     for pid in g["people"]:
@@ -204,7 +233,16 @@ def enemies_of_enemy(target_id, me_id=None, limit=30, circle_id=None):
 
         affinity = direct + 0.5 * bridge_score
         affinity = max(-3.0, min(4.5, affinity))
-        score = conflict * (3 + affinity)
+
+        conflict_n = conflict / 3.0
+        reach_n = (affinity + 3.0) / 7.5          # affinity 已钳到 [-3, 4.5]
+        clout_n = (bt.get(pid, 0.0) / mx_bt) if mx_bt else 0.0
+        # 他跟我的朋友们结了多少仇 —— 6 就封顶(两条 -3 已经很难收场了)
+        risk_raw = sum(-w for z, w in g["neg_adj"].get(pid, {}).items()
+                       if z in my_friends)
+        risk_n = min(1.0, risk_raw / 6.0)
+        score = 100.0 * conflict_n * reach_n * (
+            0.70 + 0.20 * clout_n + 0.10 * (1.0 - risk_n))
 
         conflict_kinds = [
             k["kind"] for k in
@@ -234,9 +272,12 @@ def enemies_of_enemy(target_id, me_id=None, limit=30, circle_id=None):
             "direct": direct,
             "bridge_via": _name(g, bridge_via) if bridge_via else None,
             "approach": approach,
+            "clout": round(100 * clout_n, 1),
+            "risk": round(risk_n, 2),
         })
 
-    results.sort(key=lambda r: -r["score"])
+    results.sort(key=lambda r: (-r["score"], -r["conflict"],
+                                -r["affinity"], r["id"]))
     return {
         "target": {"id": target_id, "name": _name(g, target_id)},
         "me": {"id": me_id, "name": _name(g, me_id)} if me_id else None,
@@ -337,12 +378,37 @@ def _louvain(nodes, edges):
     return node_to_super
 
 
-def detect_factions(circle_id=None):
+def _faction_label(members, core):
+    """给派系起个能说出口的名字。
+
+    UI 上"#3 派系"等于什么都没说 —— 用户脑子里本来就有的说法只有两种:
+    按部门("技术部那帮人")或者按头儿("陈国栋那一派")。主体部门占到
+    六成就用部门,说明这一伙基本就是一个建制;不到六成说明是跨部门凑起来
+    的,那部门名反而误导,只能用核心人物的名字。
+
+    平局必须确定:两个部门人数一样多时用部门名做次级键。否则同一份数据
+    换个字典遍历顺序就可能给出另一个名字,而这是要印在屏幕上的东西。
+
+    六成的判定用整数乘法(count×5 >= total×3)而不是 count/total >= 0.6:
+    0.6 在二进制里不精确,3/5 这种正好卡线的情况会被浮点误差判成不够。
+    """
+    depts = [m["dept"] for m in members if m.get("dept")]
+    if depts:
+        top = max(set(depts), key=lambda d: (depts.count(d), d))
+        if depts.count(top) * 5 >= len(members) * 3:
+            return f"{top}一系"
+    if core and core.get("name"):
+        return f"{core['name']}一派"
+    return "散人"
+
+
+def detect_factions(circle_id=None, g=None):
     """识别圈子,并标出每个圈子的核心和骑墙的人。
 
     只用正向关系聚类 —— 敌对关系不构成"一伙的"。
     """
-    g = build_graph(circle_id)
+    if g is None:
+        g = build_graph(circle_id)
     nodes = list(g["people"].keys())
     pos_edges = {k: w for k, w in g["pair_w"].items() if w > 0}
 
@@ -353,7 +419,9 @@ def detect_factions(circle_id=None):
         factions[c].append(pid)
 
     out = []
-    for cid, members in sorted(factions.items(), key=lambda kv: -len(kv[1])):
+    # 次级键用社区号:同样大的两个派系谁排前面不能看 dict 的心情
+    for cid, members in sorted(factions.items(),
+                               key=lambda kv: (-len(kv[1]), kv[0])):
         if len(members) < 1:
             continue
         member_set = set(members)
@@ -384,25 +452,53 @@ def detect_factions(circle_id=None):
         out.append({
             "id": cid,
             "size": len(members),
+            "label": _faction_label(detail, core),
             "members": detail,
             "core": core,
             "straddlers": straddlers[:5],
         })
 
     # 圈子之间的敌对强度
+    #
+    # hostility 是一堆负强度加起来的无量纲数,印在屏幕上等于没印:
+    # "7" 是多是少?占全局多大比重?到底几个人在掐?所以这里**只加字段
+    # 不动 hostility 本身**,把同一件事翻译成能复述的话 ——
+    # 几组人正面对上(fronts)、最深的一处多深(worst)、
+    # 占全圈敌意的百分比(share)、最狠的那几对是谁(pairs)。
     tensions = []
     for i, j in itertools.combinations(range(len(out)), 2):
         set_i = {m["id"] for m in out[i]["members"]}
         set_j = {m["id"] for m in out[j]["members"]}
-        hostility = 0
+        cross = []
         for (a, b), w in g["pair_w"].items():
             if w < 0 and ((a in set_i and b in set_j) or (a in set_j and b in set_i)):
-                hostility += -w
-        if hostility > 0:
-            tensions.append({
-                "a": out[i]["id"], "b": out[j]["id"], "hostility": hostility,
-            })
-    tensions.sort(key=lambda t: -t["hostility"])
+                # 让 a 永远来自 out[i] 那一派,"A方 ↔ B方"读起来才对得上
+                if a in set_j:
+                    a, b = b, a
+                cross.append((a, b, w))
+        if not cross:
+            continue
+        cross.sort(key=lambda e: (e[2], _name(g, e[0]), _name(g, e[1]), e[0], e[1]))
+        tensions.append({
+            "a": out[i]["id"], "b": out[j]["id"],
+            "hostility": sum(-w for _, _, w in cross),
+            "a_label": out[i]["label"], "b_label": out[j]["label"],
+            "a_size": out[i]["size"], "b_size": out[j]["size"],
+            "fronts": len(cross),
+            "worst": max(-w for _, _, w in cross),
+            "pairs": [{"a_id": a, "b_id": b, "a_name": _name(g, a),
+                       "b_name": _name(g, b), "w": w}
+                      for a, b, w in cross[:8]],
+        })
+
+    total_h = sum(t["hostility"] for t in tensions)
+    for t in tensions:
+        t["share"] = round(100.0 * t["hostility"] / total_h, 1) if total_h else 0.0
+
+    # 显式全序。原来只按 -hostility 排,同分时靠 sort 的稳定性保留
+    # itertools.combinations 的顺序,而那个顺序又取决于 factions 这个
+    # defaultdict 的插入序 —— 等于让排名取决于录入顺序。
+    tensions.sort(key=lambda t: (-t["hostility"], -t["fronts"], t["a"], t["b"]))
 
     return {"factions": out, "tensions": tensions,
             "assignment": {str(k): v for k, v in comm.items()}}
@@ -448,14 +544,29 @@ def _brandes(nodes, adj):
     return cb
 
 
-def key_people(limit=20, circle_id=None):
+def _betweenness(g):
+    """中介中心性,算完挂回 g 上。
+
+    Brandes 是这里最贵的一步(O(V·E)),而现在有两个地方要用它:
+    key_people 排名,和 enemies_of_enemy 的 clout 项。局势页两块都要,
+    共用同一个 g 就只算一次。缓存挂在图快照上而不是模块级字典,是因为
+    g 本身就代表"某个圈子在这一刻的样子",生命周期天然对得上,
+    不需要额外的失效逻辑。
+    """
+    if "_bt" not in g:
+        g["_bt"] = _brandes(list(g["people"].keys()), g["pos_adj"])
+    return g["_bt"]
+
+
+def key_people(limit=20, circle_id=None, g=None):
     """桥梁人物排行。"""
-    g = build_graph(circle_id)
+    if g is None:
+        g = build_graph(circle_id)
     nodes = list(g["people"].keys())
     if not nodes:
         return {"people": []}
 
-    bt = _brandes(nodes, g["pos_adj"])
+    bt = _betweenness(g)
     mx = max(bt.values()) if bt else 0
 
     rows = []
@@ -471,11 +582,12 @@ def key_people(limit=20, circle_id=None):
             "friends": pos_deg,
             "enemies": neg_deg,
         })
-    rows.sort(key=lambda r: -r["betweenness"])
+    # 同分时用 id 兜底,免得"谁进 Top 20"取决于遍历顺序
+    rows.sort(key=lambda r: (-r["betweenness"], r["id"]))
     return {"people": rows[:limit]}
 
 
-def intro_path(from_id, to_id, circle_id=None):
+def intro_path(from_id, to_id, circle_id=None, g=None):
     """我要接触某人,最短该托谁引荐。
 
     只走正向关系,边的代价 = 1/强度 —— 交情越铁,这一跳越"便宜",
@@ -492,7 +604,8 @@ def intro_path(from_id, to_id, circle_id=None):
     方向信息录进去了却从没被用过。引荐这件事上方向是实打实的:
     托师傅去说徒弟的事,和反过来,难度完全不一样。所以逆着方向走要加价。
     """
-    g = build_graph(circle_id)
+    if g is None:
+        g = build_graph(circle_id)
     if from_id not in g["people"] or to_id not in g["people"]:
         return {"error": "找不到这个人"}
     if from_id == to_id:
@@ -545,7 +658,7 @@ def intro_path(from_id, to_id, circle_id=None):
 #  4. 不稳定三角(海德结构平衡理论)
 # ============================================================
 
-def unstable_triangles(limit=40, focus_id=None, circle_id=None):
+def unstable_triangles(limit=40, focus_id=None, circle_id=None, g=None):
     """找出结构上不稳定的三角关系。
 
     海德平衡理论:三条边的符号乘积为正则稳定,为负则不稳定。
@@ -557,7 +670,8 @@ def unstable_triangles(limit=40, focus_id=None, circle_id=None):
     不稳定的三角是有张力的,局势最可能在这里翻转 —— 这就是"主要矛盾"
     的落点。撬动价值取三边强度绝对值之积:牵涉的情绪越强,翻盘影响越大。
     """
-    g = build_graph(circle_id)
+    if g is None:
+        g = build_graph(circle_id)
     adj = g["adj"]
     nodes = sorted(adj.keys())
 
@@ -622,14 +736,19 @@ def unstable_triangles(limit=40, focus_id=None, circle_id=None):
 # ============================================================
 
 def brief(target_id, circle_id=None):
-    """针对一个目标的一屏简报 —— "谋划"页的主接口。"""
+    """针对一个目标的一屏简报 —— "谋划"页的主接口。
+
+    这里一律把自己的 g 传下去。以前四个子分析各建各的图,一次 brief 要跑
+    5 遍 build_graph;加上 enemies_of_enemy 现在还要 Brandes,不共用的话
+    整个接口的成本会翻倍。
+    """
     me = db.get_me()
     me_id = me["id"] if me else None
     g = build_graph(circle_id)
     if target_id not in g["people"]:
         return {"error": "找不到这个人"}
 
-    fac = detect_factions(circle_id)
+    fac = detect_factions(circle_id, g=g)
     my_faction = tgt_faction = None
     for f in fac["factions"]:
         ids = {m["id"] for m in f["members"]}
@@ -646,11 +765,106 @@ def brief(target_id, circle_id=None):
             "title": g["people"][target_id].get("title", ""),
         },
         "allies": enemies_of_enemy(target_id, me_id, limit=10,
-                                   circle_id=circle_id),
+                                   circle_id=circle_id, g=g),
         "faction": tgt_faction,
         "same_faction_as_me": bool(
             my_faction and tgt_faction and my_faction["id"] == tgt_faction["id"]),
-        "intro": intro_path(me_id, target_id, circle_id) if me_id else None,
+        "intro": intro_path(me_id, target_id, circle_id, g=g) if me_id else None,
         "triangles": unstable_triangles(limit=10, focus_id=target_id,
-                                        circle_id=circle_id),
+                                        circle_id=circle_id, g=g),
+    }
+
+
+# ============================================================
+#  汇总:整个圈子的局势
+# ============================================================
+
+def _my_situation(g, fac):
+    """我在这张图里的处境。返回 (数据块, 缺失原因)。
+
+    "我是谁"没设过就返回 None,让前端出一个跳设置页的 CTA ——
+    静默降级成一块空白比什么都不显示更糟,用户不知道是没数据还是坏了。
+    me 设了但不在当前圈子里(比如新建的圈子还没把自己加进去)也返回 None,
+    但 missing 是另一个值:两种情况该说的话不一样。
+    """
+    me = db.get_me()
+    if not me:
+        return None, "unset"
+    me_id = me["id"]
+    if me_id not in g["people"]:
+        return None, "outside"
+
+    my_fac = None
+    for f in fac["factions"]:
+        if any(m["id"] == me_id for m in f["members"]):
+            my_fac = f
+            break
+
+    # 我这派正在跟谁对抗 —— tensions 已经排成全序了,取第一条牵扯到我的
+    front = None
+    if my_fac:
+        for t in fac["tensions"]:
+            mine_is_a = (t["a"] == my_fac["id"])
+            if not mine_is_a and t["b"] != my_fac["id"]:
+                continue
+            front = {
+                "faction_id": t["b"] if mine_is_a else t["a"],
+                "label": t["b_label"] if mine_is_a else t["a_label"],
+                "size": t["b_size"] if mine_is_a else t["a_size"],
+                "share": t["share"],
+                "fronts": t["fronts"],
+                "worst": t["worst"],
+                "pairs": t["pairs"],
+            }
+            break
+
+    # 跟我作对的人:直接来自 neg_adj,不做任何推断
+    rivals = [{"id": pid, "name": _name(g, pid),
+               "dept": g["people"][pid].get("dept", ""), "w": w}
+              for pid, w in g["neg_adj"].get(me_id, {}).items()]
+    rivals.sort(key=lambda r: (r["w"], r["name"], r["id"]))
+
+    bt = _betweenness(g)
+    mine = bt.get(me_id, 0.0)
+    mx = max(bt.values()) if bt else 0.0
+    # 名次算成"比我高的人数 + 1"。用排序后找下标的话,同分时名次会取决于
+    # 遍历顺序 —— 同一份数据可能一会儿第 5 一会儿第 7。
+    rank = sum(1 for v in bt.values() if v > mine + 1e-9) + 1
+
+    return {
+        "id": me_id,
+        "name": _name(g, me_id),
+        "dept": g["people"][me_id].get("dept", ""),
+        "faction": {
+            "id": my_fac["id"],
+            "label": my_fac["label"],
+            "size": my_fac["size"],
+            "core": my_fac["core"]["name"] if my_fac["core"] else "",
+            "is_core": bool(my_fac["core"] and my_fac["core"]["id"] == me_id),
+        } if my_fac else None,
+        "front": front,
+        "rivals": rivals,
+        "rank": rank,
+        "total": len(bt),
+        "betweenness_pct": round(100.0 * mine / mx, 1) if mx else 0.0,
+    }, None
+
+
+def situation(circle_id=None):
+    """局势页的全部数据:我 → 矛盾 → 人 → 下手处。
+
+    五块数据分别走各自的接口的话,build_graph 要跑 4 遍、Brandes 要跑 2 遍。
+    这里全程只建一次图、只算一次中介中心性,靠 g 参数传给每个算法。
+    """
+    g = build_graph(circle_id)
+    fac = detect_factions(circle_id, g=g)
+    me_block, missing = _my_situation(g, fac)
+    return {
+        "me": me_block,
+        "me_missing": missing,
+        "factions": fac["factions"],
+        "tensions": fac["tensions"],
+        "key_people": key_people(20, circle_id, g=g)["people"],
+        "triangles": unstable_triangles(limit=8, circle_id=circle_id,
+                                        g=g)["triangles"],
     }

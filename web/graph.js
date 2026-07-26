@@ -18,13 +18,17 @@
  * 保证"你在对比页看到的,就是你会得到的"。
  */
 
+/* 三档强度,方向相同(都照参考图),只在浓淡上不同。
+   **产品固定 A 档**(用户在对比页选定的),对比页已经删掉。
+   B / C 留下来只作为**测试基准**:fittest.js 用它们不同的 nameSize 跑贴合
+   用例(11.5 / 12.5 / 13 三个字号都不能把名字裁出视口),并用 B 生成一份
+   SVG 验证边的顺序。删掉它们等于要重写那批用例,不值。 */
 const GraphStyles = {
-  // 三档强度,方向相同(都照参考图),只在浓淡上不同
   A: { name: "A · 忠于参考图", ball: 1.15, glow: 2.9, glowOp: 0.62,
        edgeW: 1.5, edgeOp: 0.60, stars: 150, nameSize: 13, streak: true },
-  B: { name: "B · 中间", ball: 1.0, glow: 2.3, glowOp: 0.45,
+  B: { name: "B · 中间(测试基准)", ball: 1.0, glow: 2.3, glowOp: 0.45,
        edgeW: 1.15, edgeOp: 0.50, stars: 90, nameSize: 12.5, streak: true },
-  C: { name: "C · 收敛", ball: 0.85, glow: 1.7, glowOp: 0.28,
+  C: { name: "C · 收敛(测试基准)", ball: 0.85, glow: 1.7, glowOp: 0.28,
        edgeW: 0.9, edgeOp: 0.42, stars: 40, nameSize: 11.5, streak: false },
 };
 
@@ -34,10 +38,17 @@ const GraphView = (() => {
   let tx = 0, ty = 0, scale = 1;
   let cb = {};
   let settleTimer = null;
-  let style = GraphStyles.B;
+  let style = GraphStyles.A;
+  /* 实际用来画的那一档。style 是用户选的,rstyle 是它经过 effectiveStyle
+     按当前数据量降级之后的结果(边太多时关掉流光)。**画边的每一处都必须
+     读同一个 rstyle** —— 全量渲染关了流光而增量补丁还开着的话,补出来的边
+     会 stroke="url(#e1_2)" 引到一个不存在的渐变:线整条不可见,且不报错。 */
+  let rstyle = GraphStyles.A;
 
   // 邻接索引与当前位置(见 buildIndex)
-  let index = null, pos = null;
+  let index = null, pos = null, byId = null;
+  let lastScale = -1;              // settle 的短路:纯平移不重算
+  let lod = "all";                 // 当前的名字详略档:all / key / none
   let hovered = null, hoverLocked = false;
   let dragId = null, justDragged = false, longPress = null;
   let pendingMove = null, rafId = 0;
@@ -60,7 +71,7 @@ const GraphView = (() => {
     bindGestures();
   }
 
-  function setStyle(s) { style = s || GraphStyles.B; }
+  function setStyle(s) { style = s || GraphStyles.A; rstyle = style; }
 
   function apply() {
     canvas.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
@@ -68,20 +79,56 @@ const GraphView = (() => {
     settleTimer = setTimeout(settle, 90);
   }
 
-  /* 缩放稳定后再补偿字号:手势进行中让文字跟着缩放是自然的,松手后归位。
-     绝不在每一帧改字号 —— 那会让几十个文本节点反复重排,直接发热。
-     这里只写一个 CSS 变量,是 O(1) 的。 */
+  /* 缩放稳定后再补偿字号、再决定名字的详略。手势进行中让文字跟着缩放是自然的,
+     松手后归位。绝不在每一帧改字号 —— 那会让几十个文本节点反复重排,直接发热。
+
+     `s === lastScale` 这一句管的是**纯平移**:拖画布不改缩放,却照样一路走到
+     settle,而 --gscale 被所有节点名和边标签的 calc() 引用 —— 100 个节点时
+     约 500 个文本元素会为一次毫无变化的变量写入集体重排。 */
   function settle() {
-    svg.style.setProperty("--gscale", scale.toFixed(3));
+    const s = +scale.toFixed(3);
+    if (s === lastScale) return;
+    lastScale = s;
+    svg.style.setProperty("--gscale", s.toFixed(3));
+    applyLod(s);
+  }
+
+  /* LOD:名字显示到什么程度。**决策只在这里做一次,逐节点的匹配交给样式引擎**
+     —— #svg 上翻 .lod-key / .lod-none,CSS 里一条 `.node:not(.key) .nm{display:none}`
+     就覆盖了全部节点。对 100 个节点,选择器匹配是浏览器内部的微秒级工作,
+     而 JS 逐个 classList.toggle 是几毫秒;更要紧的是后者会把"缩放"变成
+     "遍历一遍 DOM",而这个项目的原则就是手机上不做每帧 DOM 操作。
+     settle 本来就是 90ms 防抖的,所以这里连一次遍历都不欠。
+
+     顺带白拿一个功能:CSS 里那条 `.near/.lit/.sel/.dragging 的名字强制显示`
+     让"点开某人时他和邻居的名字必显"零额外代码就成立了。 */
+  function applyLod(s) {
+    if (!data) return;
+    const lv = GraphRender.lodLevel(
+      GraphRender.lodRatio(data, s, rstyle.nameSize), lod);
+    if (lv === lod) return;
+    lod = lv;
+    svg.classList.toggle("lod-key", lv === "key");
+    svg.classList.toggle("lod-none", lv === "none");
   }
 
   function render(payload) {
     data = payload;
+    rstyle = GraphRender.effectiveStyle(style, payload);
     svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
     svg.setAttribute("width", payload.width);
     svg.setAttribute("height", payload.height);
     svg.innerHTML = GraphRender.buildSVG(payload, style);
+    /* 换数据时必须把选中态一起清掉。以前只换 innerHTML 不动 classList,
+       于是 focused 还挂着、而新 DOM 里一个 .near/.sel 都没有 ——
+       CSS 让所有节点 opacity:.14、所有边 .07,整张图发暗,
+       要等用户关掉卡片才恢复。 */
+    svg.classList.remove("focused", "hovering");
+    hovered = null; hoverLocked = false;
     buildIndex(payload);
+    // 人数变了 → 同一个 scale 下的疏密也变了,LOD 必须重新判一次
+    lastScale = -1;
+    settle();
 
     svg.querySelectorAll(".node").forEach(g => {
       const pid = +g.dataset.id;
@@ -96,11 +143,18 @@ const GraphView = (() => {
         g.addEventListener("mouseleave", () => setHover(null));
       }
     });
-    svg.querySelectorAll(".eg .edge-hit").forEach(p => {
-      p.addEventListener("click", ev => {
-        ev.stopPropagation();
-        if (cb.onEdge) cb.onEdge(+p.parentNode.dataset.a, +p.parentNode.dataset.b);
-      });
+    svg.querySelectorAll(".eg").forEach(bindEdge);
+  }
+
+  /* 单独拎出来是给增量补丁用的:补一条边时只有那一个 <g> 需要绑,
+     不能再 querySelectorAll 全图重绑(旧元素上会留下两份监听)。 */
+  function bindEdge(g) {
+    if (!g) return;
+    const hit = g.querySelector(".edge-hit");
+    if (!hit) return;
+    hit.addEventListener("click", ev => {
+      ev.stopPropagation();
+      if (cb.onEdge) cb.onEdge(+g.dataset.a, +g.dataset.b);
     });
   }
 
@@ -109,14 +163,23 @@ const GraphView = (() => {
      渲染后建一张 `节点 id → {它的边元素, 邻居 id}` 的表,
      悬停和拖动就都只碰 O(度数) 个元素,与总节点数无关。 */
 
-  function buildIndex(payload) {
+  /* keepPos:增量补丁后重建索引时必须传 true。
+     原因是 moveNode 会把拖动中的位置写回 payload 节点的 n.x/n.y ——
+     此时无条件用 n.x 重建 pos,ox(算法排好的原位)就被污染成拖后的位置,
+     松手再也飘不回去了。真正的原位只有旧 pos 记录里那一份,得留着。 */
+  function buildIndex(payload, keepPos) {
+    if (!keepPos) hovered = null;
+    else clearHover();          // 索引马上要换,先用旧索引把高亮 class 摘干净
+    const oldPos = pos;
     index = new Map();
     pos = new Map();
-    hovered = null;
     for (const n of payload.nodes) {
-      pos.set(n.id, { x: n.x, y: n.y, ox: n.x, oy: n.y });
+      const kept = keepPos && oldPos ? oldPos.get(n.id) : null;
+      pos.set(n.id, kept || { x: n.x, y: n.y, ox: n.x, oy: n.y });
     }
-    const byId = new Map(payload.nodes.map(n => [n.id, n]));
+    // 建完不要扔:nodeColor 每次都 data.nodes.find() 一遍,而人物页
+    // 每敲一个键都要给每一行算一次头像色,合起来是 O(人数²)
+    byId = new Map(payload.nodes.map(n => [n.id, n]));
     svg.querySelectorAll(".node").forEach(g => {
       const id = +g.dataset.id;
       // 把 payload 里的节点对象一并存进来,拖动时就不必每帧 find 一遍
@@ -390,6 +453,100 @@ const GraphView = (() => {
     return moved;
   }
 
+  /* ---------------- 增量补丁 ----------------
+     手动录一条关系之后**不重排整张图**。理由很硬:节点坐标只取决于
+     "这个圈子里有哪些人",跟"他俩之间多了一条边"在一次增量里毫无关系。
+     重排一次要 ~580ms 而且所有球都会动一下 —— 用户刚录完一条,
+     最想看的是那条线出现在哪,不是满屏重新洗牌。
+
+     所以两个已有节点之间加边 = 往 <g class="edges"> 里塞一个 <g>,布局一动不动。
+     只要有一端是图上还没有的人(新建的人),就返回 false 让调用方走整图重排。
+
+     边的字符串走 GraphRender.edgeMarkup —— 和 buildSVG 用的是同一份代码。
+     画边的字符串全项目只能有一份,两份是增量补丁最大的风险来源。 */
+
+  function edgeEl(a, b) {
+    return svg.querySelector(`.eg[data-a="${a}"][data-b="${b}"]`);
+  }
+
+  /* 把一段 SVG 字符串变成元素。用临时 <svg> 容器 + innerHTML,
+     而不是 insertAdjacentHTML / outerHTML —— 后两个在 SVG 元素上的实现
+     各家差异更大,而 `svg.innerHTML = buildSVG(...)` 这条路径这个项目
+     已经在 iOS 上跑了一年,是已知可靠的。 */
+  function svgFrag(html) {
+    const box = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    box.innerHTML = html;
+    return box.firstElementChild;
+  }
+
+  function putEl(parent, old, html) {
+    const el = svgFrag(html);
+    if (!el) return null;
+    if (old) old.parentNode.replaceChild(el, old);
+    else parent.appendChild(el);
+    return el;
+  }
+
+  function upsertEdge(a, b, agg) {
+    if (!data || !index || !svg) return false;
+    const k = GraphRender.pairKey(a, b);
+    const lo = k[0], hi = k[1];
+    if (!pos.has(lo) || !pos.has(hi)) return false;   // 有新人 → 必须重排
+    // 聚合完权重是 0 且不是混合关系 —— 服务端会整条丢掉,这里也得丢
+    if (!agg || !agg.visible) return removeEdge(lo, hi);
+
+    // 端点取 ox/oy(算法排好的原位)而不是 pos.x/y:后者可能正被手指拖着,
+    // 松手会飘回原位,存进 payload 的必须是原位那一份。
+    const e = GraphRender.edgeFromPair(lo, hi, agg,
+      id => { const p = pos.get(id); return { x: p.ox, y: p.oy }; },
+      GraphRender.curveCap(data));
+
+    const group = svg.querySelector(".edges");
+    if (!group) return false;
+    const i = data.edges.findIndex(x => x.a === lo && x.b === hi);
+    /* 原地替换 / 追加到末尾 —— 两条路径都保住了
+       "第 i 个 .eg 元素 == payload.edges[i]" 这条 buildIndex 依赖的不变量。
+       破坏它的话边会接到别的节点身上,而且只在悬停/拖动时才现形。 */
+    const el = putEl(group, edgeEl(lo, hi),
+                     GraphRender.edgeMarkup(e, rstyle, ""));
+    // 没真的插进 DOM 就绝不能动 data.edges —— 一动索引就错位了,
+    // 而错位之后每条边都接在别人身上,比不打这个补丁糟得多
+    if (!el) return false;
+    if (i >= 0) data.edges[i] = e;
+    else data.edges.push(e);
+
+    // rstyle 而不是 style:整图渲染时若因边太多关掉了流光,补出来的这条
+    // 也必须跟着关,否则它会去引一个 defs 里根本没有的渐变
+    if (rstyle.streak) {
+      const defs = svg.querySelector("defs");
+      // 渐变 id 对不上的话 stroke="url(#e1_2)" 会引到一个不存在的东西:
+      // 线整条不可见,而且不报任何错
+      if (defs) putEl(defs, svg.querySelector(`#e${lo}_${hi}`),
+                      GraphRender.streakDef(e, ""));
+    }
+
+    buildIndex(data, true);
+    bindEdge(el);                   // 换上去的是新元素,监听得重新挂
+    refreshEdgesOf(lo);             // 端点若正被拖着,路径得跟到当前位置
+    refreshEdgesOf(hi);
+    return true;
+  }
+
+  function removeEdge(a, b) {
+    if (!data || !index || !svg) return false;
+    const k = GraphRender.pairKey(a, b);
+    const lo = k[0], hi = k[1];
+    if (!pos.has(lo) || !pos.has(hi)) return false;
+    const g = edgeEl(lo, hi);
+    if (g) g.remove();
+    const grad = svg.querySelector(`#e${lo}_${hi}`);
+    if (grad) grad.remove();
+    const i = data.edges.findIndex(x => x.a === lo && x.b === hi);
+    if (i >= 0) data.edges.splice(i, 1);
+    buildIndex(data, true);
+    return true;
+  }
+
   /* ---------------- 选中态 ---------------- */
 
   function focus(pid) {
@@ -441,7 +598,7 @@ const GraphView = (() => {
     const r = stage.getBoundingClientRect();
     const f = GraphRender.computeFit(data.nodes, {
       stageW: r.width, stageH: r.height,
-      bottomInset: bottomInset || 0, nameSize: style.nameSize,
+      bottomInset: bottomInset || 0, nameSize: rstyle.nameSize,
     });
     scale = f.scale; tx = f.tx; ty = f.ty;
     apply();
@@ -562,8 +719,9 @@ const GraphView = (() => {
   }
 
   function nodeColor(id) {
-    if (!data) return "var(--sph)";
-    const n = data.nodes.find(x => x.id === id);
+    // 走 buildIndex 建好的 byId,不再线性 find —— 这个函数是人物页
+    // 每一行的头像色的来源,一次搜索会调上百次
+    const n = byId ? byId.get(id) : null;
     if (!n) return "var(--sph)";
     if (n.is_me) return "var(--me)";
     if (svg.classList.contains("by-faction"))
@@ -572,7 +730,7 @@ const GraphView = (() => {
   }
 
   return { init, render, fit, focus, focusEdge, centerOn, nodeColor,
-           setFactionMode, setStyle, resetPositions };
+           setFactionMode, setStyle, resetPositions, upsertEdge, removeEdge };
 })();
 
 
@@ -597,6 +755,92 @@ const GraphRender = (() => {
 
   function labelHalfPx(name, nameSize) {
     return String(name || "").length * nameSize * CHAR_W / 2;
+  }
+
+  /* ---------------- LOD:名字要显示到什么程度 ----------------
+
+     阈值**不能写死成 `scale > 0.6` 这种数**。画布尺寸随 √人数变化
+     (layout.canvas_of:k = √(人数/20),钳在 0.55~2.6),所以复位后的 scale
+     跟人数强相关 —— 实测同一台 iPhone(390×844)上,19 人复位到 0.636,
+     100 人复位到 0.259。写死 0.6 的话:19 人永远全开(哪怕捏到很小),
+     100 人永远不开(哪怕放大到看得清)。两边都错。
+
+     能拿来比的是这两个量:
+       · 屏幕上的节点间距 = NN_FACTOR × √(画布面积 / 人数) × scale
+         ← 前半截是画布单位,乘 scale 才变成屏幕像素
+       · 最长名字的宽度   = 字数 × nameSize × CHAR_W
+         ← **恒定屏幕像素**,不随缩放变
+     这正是 computeFit 赖以成立的那个二分(球是画布单位、名字是屏幕像素)。
+     把两者混起来就是上一版栽的那个跟头 —— 别再混。
+
+     NN_FACTOR:√(面积/人数) 是"每人一格"的格距,而真实的最近邻距离比它小,
+     因为力导向布局会成团。实测平均最近邻 / 格距:
+       紧凑化之后  19 人 133/177 = 0.75、100 人 127/177 = 0.72、199/260 = 0.77
+       紧凑化之前  19 人竖屏 0.58、宽屏 0.65
+     取 0.70(两代布局的中位),偏保守的一侧。fittest.js 里对真实坐标核了
+     这个系数落在 0.5~0.9 之间 —— 布局哪天散开或塌成一团,那条会先响。
+
+     比值 ≥1 → 相邻两个名字互不相撞,全开。
+     只留 key 时节点数降到 KEY_SHARE(layout.py 的 keep = round(人数 × 0.3)),
+     间距放大 1/√0.3 ≈ 1.83 倍,所以比值 ≥ √0.3 ≈ 0.55 就够。
+     **这个数是推出来的**;哪天 layout.py 改了那个 0.3,改这里一个常量即可。
+     (layout 还会额外把"我"和度数≥5 的人也标成 key,所以实际比例只会更高 ——
+     误差落在"名字留多了"这一侧,不会突然全没。)
+
+     解决拥挤的正解是**减少名字的数量**,不是把名字改小:
+     --gscale 的反向补偿曲线一动,computeFit 的贴合立刻跟着塌。 */
+  const LOD_NN_FACTOR = 0.70;
+  const LOD_KEY_SHARE = 0.30;
+  const LOD_T_ALL = 1.0;
+  const LOD_T_KEY = Math.sqrt(LOD_KEY_SHARE);
+  const LOD_HYST = 0.08;
+
+  function lodRatio(payload, scale, nameSize) {
+    const nodes = (payload && payload.nodes) || [];
+    if (!nodes.length) return Infinity;
+    let longest = 1;
+    for (const n of nodes) {
+      const len = String(n.name || "").length;
+      if (len > longest) longest = len;
+    }
+    const spacing = LOD_NN_FACTOR * scale * Math.sqrt(
+      (payload.width * payload.height) / nodes.length);
+    return spacing / (longest * nameSize * CHAR_W);
+  }
+
+  /* ±8% 迟滞。不加的话,捏合到阈值附近手指一抖,几十个名字就会成片地
+     开、关、开 —— 比一直不显示还难受。往"显示得更多"走要越过上沿,
+     往回退要跌破下沿,中间这 16% 是死区。 */
+  function lodLevel(ratio, prev) {
+    const up = 1 + LOD_HYST, dn = 1 - LOD_HYST;
+    const allT = LOD_T_ALL * (prev === "all" ? dn : up);
+    const keyT = LOD_T_KEY * (prev === "none" ? up : dn);
+    if (ratio >= allT) return "all";
+    if (ratio >= keyT) return "key";
+    return "none";
+  }
+
+  /* 星点数量封顶。数量按画布面积算(stars × 面积 / 130 万),而画布随 √人数
+     变大:100 人的竖屏画布到 6.75M px²,A 档会生成 778 个 <circle> ——
+     全是纯装饰,一个都点不着。260 个在最大画布上仍有 38 颗/百万 px²,
+     肉眼分辨不出少了。 */
+  const STAR_CAP = 260;
+
+  /* 流光渐变按边数降级。100 人 ≈ 381 条边,每条一个 <linearGradient> + 4~6 个
+     <stop> = 约 1905 个 DOM 节点,而那个尺度上每条线在屏幕上只有几十像素长,
+     "两端淡出"根本看不见 —— 为一个看不见的效果付了全场最大的一笔 DOM 开销。
+
+     **不要改成共享渐变**:流光靠 gradientUnits="userSpaceOnUse" + 每条边自己的
+     端点坐标,换成 objectBoundingBox 之后竖直边的包围盒宽度≈0,渐变会退化成
+     纯色。这不是懒得做,是数学上做不到。 */
+  const STREAK_MAX_EDGES = 160;
+
+  function effectiveStyle(st, payload) {
+    const style = st || GraphStyles.A;
+    const n = payload && payload.edges ? payload.edges.length : 0;
+    if (!style.streak || n <= STREAK_MAX_EDGES) return style;
+    // 复制一份,绝不改 GraphStyles.A 本身 —— 那是全局共享的常量
+    return Object.assign({}, style, { streak: false });
   }
 
   /* 计算贴合视口的变换。**纯函数,不碰 DOM**,所以能在 node 里自动验证。
@@ -694,8 +938,154 @@ const GraphRender = (() => {
   const PALETTES = [["sph", "--sph"], ["me", "--me"],
                     ["f1", "--f1"], ["f2", "--f2"], ["f3", "--f3"]];
 
+  /* 一条边的流光渐变。**只有这一处**生成它 —— buildSVG 全量渲染和
+     GraphView.upsertEdge 增量补丁走的是同一个函数,所以不可能画得不一样。 */
+  function streakDef(e, idPrefix) {
+    const P = idPrefix || "";
+    const head = `<linearGradient id="${P}e${e.a}_${e.b}" ` +
+      `gradientUnits="userSpaceOnUse" ` +
+      `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}">`;
+    /* 混合关系(既是朋友又是对手)画成一头青一头红 —— 一眼就能看出
+       "这两个人关系很复杂"。这是图上信息量最大的一种边:结构洞所在。
+       正好复用已有的流光渐变机制,零额外成本、不用 filter。 */
+    if (e.mixed) {
+      return head +
+        `<stop offset="0%"   stop-color="var(--pos)" stop-opacity="0.10"/>` +
+        `<stop offset="26%"  stop-color="var(--pos)" stop-opacity="1"/>` +
+        `<stop offset="50%"  stop-color="var(--pos)" stop-opacity="0.9"/>` +
+        `<stop offset="50%"  stop-color="var(--neg)" stop-opacity="0.9"/>` +
+        `<stop offset="74%"  stop-color="var(--neg)" stop-opacity="1"/>` +
+        `<stop offset="100%" stop-color="var(--neg)" stop-opacity="0.10"/>` +
+        `</linearGradient>`;
+    }
+    const v = e.w < 0 ? "--neg" : "--pos";
+    return head +
+      `<stop offset="0%"   stop-color="var(${v})" stop-opacity="0.06"/>` +
+      `<stop offset="30%"  stop-color="var(${v})" stop-opacity="1"/>` +
+      `<stop offset="70%"  stop-color="var(${v})" stop-opacity="1"/>` +
+      `<stop offset="100%" stop-color="var(${v})" stop-opacity="0.06"/>` +
+      `</linearGradient>`;
+  }
+
+  /* 一条边的可见部分(路径 + 命中区 + 标签)。理由同上:全项目一份。 */
+  function edgeMarkup(e, st, idPrefix) {
+    const style = st || GraphStyles.A;
+    const P = idPrefix || "";
+    const mix = !!e.mixed;
+    const neg = !mix && e.w < 0;
+    const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
+    const solid = neg ? "--neg" : "--pos";
+    // 混合边的双色只存在于渐变里,所以它无视 streak 降级 —— 见 buildSVG 的 else 分支
+    const stroke = (style.streak || mix)
+      ? `url(#${P}e${e.a}_${e.b})` : `var(${solid})`;
+    // 混合边和负向边一样要压过正向边的视觉权重 —— 它们是"值得看的地方"
+    const op = (neg || mix) ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
+    const cls = mix ? "mix" : (neg ? "neg" : "pos");
+    return `<g class="eg ${cls}" data-a="${e.a}" data-b="${e.b}">` +
+      `<path class="edge" d="${d}" stroke="${stroke}" ` +
+        `stroke-width="${(e.width * style.edgeW).toFixed(2)}" ` +
+        `opacity="${op.toFixed(2)}"${neg ? ' stroke-dasharray="7 6"' : ""}/>` +
+      `<path class="edge-hit" d="${d}"/>` +
+      `<text class="elabel" x="${e.mx}" y="${e.my - 11}">` +
+        `${esc(e.glyph)} ${esc(e.label)}` +
+        (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
+      `</g>`;
+  }
+
+  /* ---------------- 增量补丁要用的纯计算 ----------------
+
+     下面这三个函数是 **analysis.build_graph + layout._edge_display 的逐字复刻**。
+     手动录完一条关系后前端要自己算出那条边长什么样,不能再去问服务端
+     (/api/graph 是个会写库的 GET,和用户的 POST 并发会串事务)。
+
+     复刻必须逐字,差一点就会出现"图上这条线和刷新后不一样"这种最难查的 bug。
+     所以 fittest.js 里用 python 跑真实管线导出了期望值逐条对。
+     尤其注意:**Python 的 max 平局取第一个,所以下面一律写 > 不能写 >=**。 */
+
+  // 键归一成 (min, max) —— 服务端的 pair_kinds 就是这么建的
+  function pairKey(a, b) {
+    return a <= b ? [a, b] : [b, a];
+  }
+
+  function pairAggregate(rels, glyphMap) {
+    const gm = glyphMap || {};
+    const list = rels || [];
+    let w = 0, pw = 0, nw = 0;
+    for (const r of list) {
+      const s = +r.strength || 0;
+      w += s;
+      if (s > 0) pw += s;
+      else if (s < 0) nw += s;
+    }
+    // 先求和再钳,和服务端同序 —— 反过来的话 (+3,+3) 会得到 +3 而不是 +3 的钳值
+    w = Math.max(-3, Math.min(3, w));
+    pw = Math.min(3, pw);
+    nw = Math.max(-3, nw);
+
+    // 正负分量都非零 = 混合关系。这类边**即便合并权重是 0 也必须存在**,
+    // 「私交极好但工作上是对手」正是最该被看见的一种关系。
+    const mixed = pw > 0 && nw < 0;
+    const mag = Math.max(Math.abs(w), Math.abs(pw), Math.abs(nw));
+    const base = {
+      w, pw, nw, mixed,
+      count: list.length,
+      all_kinds: list.map(r => r.kind),
+      // 服务端:round(0.8 + 0.47 * mag, 2)
+      width: Math.round((0.8 + 0.47 * mag) * 100) / 100,
+      visible: list.length > 0 && (w !== 0 || mixed),
+    };
+
+    let dom = null, best = -1;
+    for (const r of list) {
+      const m = Math.abs(+r.strength || 0);
+      if (m > best) { best = m; dom = r; }      // > 不是 >=:平局取第一个
+    }
+    const cat = (dom && dom.cat) || "社交";
+
+    if (mixed) {
+      // 混合边的标签要同时点出两面,只显示"最强的那个"会误导 ——
+      // 强度相同时(朋友+2 / 竞争-2)取哪个纯属偶然
+      let pk = null, nk = null;
+      for (const r of list) {
+        const s = +r.strength || 0;
+        if (s > 0 && (!pk || s > (+pk.strength || 0))) pk = r;
+        if (s < 0 && (!nk || s < (+nk.strength || 0))) nk = r;
+      }
+      if (pk && nk) {
+        return Object.assign(base, {
+          label: `${pk.kind} / ${nk.kind}`, cat, glyph: "⚡",
+        });
+      }
+    }
+    return Object.assign(base, {
+      label: dom ? dom.kind : "", cat, glyph: gm[cat] || "",
+    });
+  }
+
+  // 服务端坐标都 round 到 1 位小数,这里跟着走,免得同一条边刷新前后差 0.03
+  const r1 = v => Math.round(v * 10) / 10;
+
+  /* 聚合结果 + 两个端点的位置 → 一条和服务端 payload 同构的边对象。
+     纯函数(位置靠 getPos 回调传进来),所以能在 node 里断言。 */
+  function edgeFromPair(a, b, agg, getPos, cap) {
+    const k = pairKey(a, b);
+    const A = getPos(k[0]), B = getPos(k[1]);
+    const q = arc(A.x, A.y, B.x, B.y, cap);
+    return {
+      a: k[0], b: k[1],
+      x1: r1(A.x), y1: r1(A.y), x2: r1(B.x), y2: r1(B.y),
+      cx: r1(q.cx), cy: r1(q.cy),
+      mx: r1(q.qx), my: r1(q.qy),
+      w: agg.w, pw: agg.pw, nw: agg.nw, width: agg.width,
+      label: agg.label, cat: agg.cat, glyph: agg.glyph,
+      count: agg.count, all_kinds: agg.all_kinds, mixed: agg.mixed,
+    };
+  }
+
   function buildSVG(payload, st, idPrefix) {
-    const style = st || GraphStyles.B;
+    // 降级判定放在这里,GraphView.render 也调同一个函数存进 rstyle ——
+    // 两边必须得出同一个答案,否则增量补丁会引到不存在的渐变
+    const style = effectiveStyle(st, payload);
     const P = idPrefix || "";              // 一个页面渲染多份时用来隔离 id
     const W = payload.width, H = payload.height;
     const dens = payload.density || 1;     // 人越多,光晕越收,免得糊成一片
@@ -709,61 +1099,23 @@ const GraphRender = (() => {
     }
     if (style.streak) {
       // 流光连线:两端淡出、中间实 —— 线就有了光带的收束感
-      for (const e of payload.edges) {
-        /* 混合关系(既是朋友又是对手)画成一头青一头红 —— 一眼就能看出
-           "这两个人关系很复杂"。这是图上信息量最大的一种边:结构洞所在。
-           正好复用已有的流光渐变机制,零额外成本、不用 filter。 */
-        if (e.mixed) {
-          out.push(
-            `<linearGradient id="${P}e${e.a}_${e.b}" gradientUnits="userSpaceOnUse" ` +
-            `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}">` +
-            `<stop offset="0%"   stop-color="var(--pos)" stop-opacity="0.10"/>` +
-            `<stop offset="26%"  stop-color="var(--pos)" stop-opacity="1"/>` +
-            `<stop offset="50%"  stop-color="var(--pos)" stop-opacity="0.9"/>` +
-            `<stop offset="50%"  stop-color="var(--neg)" stop-opacity="0.9"/>` +
-            `<stop offset="74%"  stop-color="var(--neg)" stop-opacity="1"/>` +
-            `<stop offset="100%" stop-color="var(--neg)" stop-opacity="0.10"/>` +
-            `</linearGradient>`);
-          continue;
-        }
-        const v = e.w < 0 ? "--neg" : "--pos";
-        out.push(
-          `<linearGradient id="${P}e${e.a}_${e.b}" gradientUnits="userSpaceOnUse" ` +
-          `x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}">` +
-          `<stop offset="0%"   stop-color="var(${v})" stop-opacity="0.06"/>` +
-          `<stop offset="30%"  stop-color="var(${v})" stop-opacity="1"/>` +
-          `<stop offset="70%"  stop-color="var(${v})" stop-opacity="1"/>` +
-          `<stop offset="100%" stop-color="var(${v})" stop-opacity="0.06"/>` +
-          `</linearGradient>`);
-      }
+      for (const e of payload.edges) out.push(streakDef(e, P));
+    } else {
+      /* 流光被边数降级关掉了,但**混合边必须保留自己的渐变** ——
+         它那"一头青一头红"就是靠渐变画的,退回纯色后会变成一条纯红实线,
+         和负向边只差没有虚线,而图例还在承诺双色。
+         而且这恰恰发生在最需要区分的规模上(边多 = 人多 = 更需要看清谁跟谁
+         关系复杂)。混合边本来就稀少,为它们保留 per-edge 渐变的开销可以忽略。 */
+      for (const e of payload.edges) if (e.mixed) out.push(streakDef(e, P));
     }
     out.push("</defs>");
 
-    // 星点压在最底层
-    out.push(stars(W, H, Math.round(style.stars * (W * H) / 1300000)));
+    // 星点压在最底层。封顶见 STAR_CAP —— 不封的话 100 人会画 778 个圆
+    out.push(stars(W, H,
+      Math.min(STAR_CAP, Math.round(style.stars * (W * H) / 1300000))));
 
     out.push('<g class="edges">');
-    for (const e of payload.edges) {
-      const mix = !!e.mixed;
-      const neg = !mix && e.w < 0;
-      const d = `M${e.x1},${e.y1} Q${e.cx},${e.cy} ${e.x2},${e.y2}`;
-      const solid = mix ? "--neg" : (neg ? "--neg" : "--pos");
-      const stroke = style.streak
-        ? `url(#${P}e${e.a}_${e.b})` : `var(${solid})`;
-      // 混合边和负向边一样要压过正向边的视觉权重 —— 它们是"值得看的地方"
-      const op = (neg || mix) ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
-      const cls = mix ? "mix" : (neg ? "neg" : "pos");
-      out.push(
-        `<g class="eg ${cls}" data-a="${e.a}" data-b="${e.b}">` +
-        `<path class="edge" d="${d}" stroke="${stroke}" ` +
-          `stroke-width="${(e.width * style.edgeW).toFixed(2)}" ` +
-          `opacity="${op.toFixed(2)}"${neg ? ' stroke-dasharray="7 6"' : ""}/>` +
-        `<path class="edge-hit" d="${d}"/>` +
-        `<text class="elabel" x="${e.mx}" y="${e.my - 11}">` +
-          `${esc(e.glyph)} ${esc(e.label)}` +
-          (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
-        `</g>`);
-    }
+    for (const e of payload.edges) out.push(edgeMarkup(e, style, P));
     out.push("</g>");
 
     out.push('<g class="nodes">');
@@ -771,8 +1123,12 @@ const GraphRender = (() => {
       const r = n.r * style.ball;
       const pal = n.is_me ? "me" : "sph";
       const fac = n.frank < 3 ? "f" + (n.frank + 1) : "f1";
+      /* n.key 是 layout.py 早就算好的"这个人重要到名字该常显"(前端以前
+         0 处引用)。它只落成一个 class,显不显示由 #svg 上的 .lod-* 决定 ——
+         JS 一次都不用去遍历这些节点。 */
       out.push(
-        `<g class="node ${n.is_me ? "me " : ""}fac-${fac}" data-id="${n.id}">` +
+        `<g class="node ${n.is_me ? "me " : ""}${n.key ? "key " : ""}` +
+        `fac-${fac}" data-id="${n.id}">` +
         `<circle class="glow" cx="${n.x}" cy="${n.y}" ` +
           `r="${(r * style.glow).toFixed(1)}" fill="url(#${P}glow_${pal})" ` +
           `data-fac="${P}glow_${fac}"/>` +
@@ -796,5 +1152,8 @@ const GraphRender = (() => {
     return out.join("");
   }
 
-  return { buildSVG, esc, computeFit, arc, curveCap, labelHalfPx };
+  return { buildSVG, esc, computeFit, arc, curveCap, labelHalfPx,
+           edgeMarkup, streakDef, pairAggregate, pairKey, edgeFromPair,
+           lodRatio, lodLevel, effectiveStyle,
+           STAR_CAP, STREAK_MAX_EDGES, LOD_NN_FACTOR, LOD_HYST };
 })();

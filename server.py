@@ -289,6 +289,23 @@ def api_factions(handler, query, body):
     return cached
 
 
+@route("GET", "/api/analysis/situation")
+def api_situation(handler, query, body):
+    """局势页的一次性数据。刻意与上面的 api_factions 逐行同构。
+
+    key 里不放 me_id:db.cache_get 本来就带 graph_version 校验,而 db.set_me
+    也会 bump 一次 version —— 换了"我是谁"缓存自然作废。再往 key 里塞
+    me_id 只会造出一堆永远命中不了的键,还得自己想清楚什么时候清。
+    """
+    cid = _cid(query)
+    key = f"situation_{cid or 'all'}"
+    cached = db.cache_get(key)
+    if cached is None:
+        cached = analysis.situation(cid)
+        db.cache_put(key, cached)
+    return cached
+
+
 @route("GET", "/api/analysis/key")
 def api_key_people(handler, query, body):
     return analysis.key_people(int(query.get("limit", [20])[0]), _cid(query))

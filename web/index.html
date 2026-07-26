@@ -65,6 +65,12 @@
     <circle cx="12" cy="12" r="3"/>
     <path d="M19.9 15a1.7 1.7 0 00.34 1.87l.06.06a1.9 1.9 0 11-2.7 2.7l-.06-.06a1.7 1.7 0 00-2.9 1.2V21a1.9 1.9 0 11-3.8 0v-.1a1.7 1.7 0 00-2.9-1.2l-.06.06a1.9 1.9 0 11-2.7-2.7l.06-.06A1.7 1.7 0 003 15H3a1.9 1.9 0 110-3.8h.1a1.7 1.7 0 001.2-2.9l-.06-.06a1.9 1.9 0 112.7-2.7l.06.06A1.7 1.7 0 0010 4.5V4a1.9 1.9 0 013.8 0v.1a1.7 1.7 0 002.9 1.2l.06-.06a1.9 1.9 0 012.7 2.7l-.06.06a1.7 1.7 0 001.2 2.9H21a1.9 1.9 0 010 3.8h-.1a1.7 1.7 0 00-1.2 1z"/>
   </symbol>
+  <!-- 局势页。旗子:阵地、战线、谁跟谁对着 —— 一眼能和「图谱」(三个球)、
+       「复位」(四角+准心)区分开,不靠细节辨认。 -->
+  <symbol id="i-flag" viewBox="0 0 24 24">
+    <path d="M5.5 21.5V3.5"/>
+    <path d="M5.5 4.6h12.2l-2.7 4 2.7 4H5.5"/>
+  </symbol>
   <symbol id="i-caret" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
@@ -124,6 +130,12 @@
       <div class="ai-row">
         <textarea id="aiInput" rows="1"
           placeholder="说点什么,或丢一张聊天截图…"></textarea>
+        <!-- 手动录入入口。挤在附件键左边,**送出键的位置一点不动** ——
+             那是肌肉记忆。也不做悬浮 FAB:右下角被送出键占着,左下角是图例。
+             「AI 录一笔」和「手动录一笔」本来就该在同一个容器里。 -->
+        <button class="ai-btn" id="aiPlus" title="手动录入"
+                aria-label="手动录入人物、关系或一笔事情">
+          <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button>
         <button class="ai-btn" id="aiAttach" title="上传截图或文档"
                 aria-label="上传截图或文档">
           <svg class="ic" aria-hidden="true"><use href="#i-attach"/></svg></button>
@@ -135,11 +147,23 @@
     </div>
   </section>
 
+  <!-- ================= 局势 =================
+       内容全部由 renderSituation 填。这一页只发 GET /api/analysis/situation,
+       **不搭 /api/graph 的车** —— 后者是全项目最慢的接口,而且每次 resize、
+       每次切圈子都会重发。 -->
+  <section class="view hidden" id="view-situation">
+    <div class="pad"><div class="pad-inner" id="situationBody"></div></div>
+  </section>
+
   <!-- ================= 人物 ================= -->
   <section class="view hidden" id="view-people">
     <div class="pad"><div class="pad-inner">
-      <input id="peopleSearch" class="input" placeholder="搜索姓名 / 部门 / 职位"
-             autocomplete="off" oninput="renderPeople()">
+      <!-- 搜没搜到都在这儿:搜不到正是最想新建的时刻 -->
+      <div class="hstack">
+        <input id="peopleSearch" class="input grow" placeholder="搜索姓名 / 部门 / 职位"
+               autocomplete="off" oninput="renderPeople()">
+        <button class="btn" id="newPersonBtn">＋ 新建</button>
+      </div>
       <div id="peopleList" class="list" style="margin-top:12px"></div>
     </div></div>
   </section>
@@ -170,16 +194,26 @@
   <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
 </dialog>
 
+<!-- 四个 tab 零 CSS 改动就装得下:#tabbar 是 flex、.navbtn 是 flex:1,
+     iPhone SE(320px)上各 80px,桌面走 flex:0 0 130px 居中,4×130=520 也够。
+     「局势」排第二 —— 使用频率仅次于图谱;设置留在最右,它最不常用,
+     而大屏手机右下角恰好是拇指最难够到的地方。 -->
 <nav id="tabbar" role="tablist">
   <button class="navbtn on" data-view="graph" aria-current="page">
     <svg class="ic lg" aria-hidden="true"><use href="#i-graph"/></svg><span>图谱</span></button>
+  <button class="navbtn" data-view="situation">
+    <svg class="ic lg" aria-hidden="true"><use href="#i-flag"/></svg><span>局势</span></button>
   <button class="navbtn" data-view="people">
     <svg class="ic lg" aria-hidden="true"><use href="#i-person"/></svg><span>人物</span></button>
   <button class="navbtn" data-view="settings">
     <svg class="ic lg" aria-hidden="true"><use href="#i-gear"/></svg><span>设置</span></button>
 </nav>
 
-<div id="toast" class="hidden"></div>
+<!-- 必须是 <dialog>:卡片用 showModal() 之后在 top layer,普通元素的
+     z-index 再高也盖不住它 —— 而 19 处 toast 是在卡片开着时触发的,
+     其中包括替代 confirm() 的那个「撤销」。非模态的 .show() 同样进
+     top layer,但不抢焦点、不加遮罩、不拦背后的点击。 -->
+<dialog id="toast" aria-live="polite"></dialog>
 <div id="busy" class="hidden"><div class="box"></div></div>
 
 <script src="/graph.js"></script>

@@ -152,6 +152,11 @@ body{
   -webkit-font-smoothing:antialiased;
 }
 .hidden{display:none !important}
+/* 属性形式的 hidden 也必须真的隐藏。UA 样式表里的 [hidden]{display:none} 特指度
+   是 (0,1,0),而 .row 自己写着 display:flex —— 后者赢,元素照样显示。
+   人物页的搜索靠翻每一行的 .hidden 属性(列表只建一次,不再重建 DOM),
+   漏了这一条的表现就是"打字没反应",而且不报任何错。 */
+[hidden]{display:none !important}
 .spacer{flex:1}
 button{font-family:inherit;color:inherit}
 
@@ -317,6 +322,27 @@ button{font-family:inherit;color:inherit}
   stroke-width:calc(3.5px / var(--gscale));stroke-linejoin:round;
 }
 :root[data-theme="light"] .node .nm{stroke:#fff;stroke-width:calc(4px / var(--gscale))}
+
+/* ---- LOD:名字显示到什么程度 ----
+   人一多,名字就会糊成一片,而它们又是恒定屏幕像素(见 computeFit 的注释),
+   缩得越小挤得越狠。**正解是少画几个名字,不是把名字改小。**
+
+   JS 只在 settle()(90ms 防抖)里翻 #svg 上的一个 class,逐节点的匹配交给
+   样式引擎 —— 100 个节点的选择器匹配是浏览器内部的微秒级工作,而
+   "JS 遍历一遍 DOM"会把缩放变成一件每帧都要做的事,那是本项目的红线。
+   .key 由 layout.py 的 n.key 落下来(中介中心性排进前 30%、或连了 5 个人以上、
+   或者就是"我")。 */
+#svg.lod-key .node:not(.key) .nm{display:none}
+#svg.lod-none .node .nm{display:none}
+
+/* 这一条是把 LOD 做成层叠而不是 JS 循环的红利:
+   **聚焦某人时,他和邻居的名字必显** —— 零额外代码,因为 .near / .sel 本来
+   就是 focus() 打上去的,.lit 是悬停打的,.dragging 是拖动打的。
+   要是写成 JS 循环,这件事得在四个地方各补一段"记得把名字放出来"。 */
+#svg.lod-key .node.near .nm,#svg.lod-key .node.lit .nm,
+#svg.lod-key .node.sel .nm,#svg.lod-key .node.dragging .nm,
+#svg.lod-none .node.near .nm,#svg.lod-none .node.lit .nm,
+#svg.lod-none .node.sel .nm,#svg.lod-none .node.dragging .nm{display:inline}
 
 /* 选中态:其余深深淡出,目标和邻居全亮,连线上浮出关系文字 */
 #svg.focused .node{opacity:.14;transition:opacity .2s ease}
@@ -660,6 +686,38 @@ label.hstack{min-height:var(--tap);cursor:pointer}
 /* 列表里的排名序号 */
 .row .rank{width:20px;flex:none;text-align:center}
 
+/* 行尾的分档列:词在上、注脚在下。
+   分数、百分比这类无量纲数字永远只做注脚 —— 单甩一个「77.44」没人知道是高
+   是低,而用户会照着它排的顺序去行动。词负责结论,数字负责同档内比较。 */
+.tier{
+  flex:none;text-align:right;line-height:var(--lh-tight);
+  font-size:var(--fs-small);font-weight:var(--fw-med);
+  font-variant-numeric:tabular-nums;
+  /* 「基本指望不上」六个字在 320px 上会折成两行,把「词在上、注脚在下」
+     的结构搅乱。宁可让左边的名字列窄一点(它有 min-width:0,会自己换行)。 */
+  white-space:nowrap;
+}
+.tier em{
+  display:block;font-style:normal;font-weight:var(--fw-normal);
+  color:var(--dim);font-size:var(--fs-micro);margin-top:var(--sp-05);
+}
+
+/* 折叠块(局势页的派系名册)。<details> 自带展开逻辑,零 JS、零状态。
+   Safari 的三角要靠 ::-webkit-details-marker 关,list-style 那条管其余浏览器
+   —— 只写一条会在另一半设备上多出一个小三角。 */
+.fold summary{
+  list-style:none;cursor:pointer;
+  display:flex;align-items:center;gap:var(--sp-2);
+  min-height:var(--tap);padding:var(--sp-3);
+  background:var(--bg-2);border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+  font-size:var(--fs-base);color:var(--text-2);
+}
+.fold summary::-webkit-details-marker{display:none}
+.fold summary::after{content:"›";margin-left:auto;color:var(--dim)}
+.fold[open] summary{margin-bottom:var(--sp-2)}
+.fold[open] summary::after{content:"⌄"}
+
 /* 段落级留白由结构决定,不再逐处写 margin:0 —— 那是把同一件事
    重复写十几遍,而且总有漏的。 */
 .card > :first-child{margin-top:0}
@@ -673,16 +731,81 @@ textarea.compact{min-height:80px}
 /* 列表为空时的占位行 */
 .empty-line{padding:var(--sp-6) 0;text-align:center}
 
-body.masked .blurable{filter:blur(5px);user-select:none}
-body.masked .node .nm,body.masked .node .ini{opacity:.2 !important}
+/* ---------------- 打码 ----------------
 
-#toast{
-  position:fixed;left:50%;bottom:calc(104px + var(--safe-b));
-  transform:translateX(-50%);
-  background:var(--text);color:var(--bg-0);font-weight:var(--fw-med);
-  padding:9px 17px;border-radius:var(--r-md);z-index:100;font-size:var(--fs-small);
-  box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:86vw;text-align:center;
+   以前这里是 filter:blur(5px) —— 两个问题,都不小:
+     ① **违反本文件开头 14~17 行自己立的性能红线**。filter 在 iOS Safari 上极慢,
+        当初就是为了避开它才把光晕改成 SVG 径向渐变画的。
+     ② blur 对 13px 的中文只是"糊",笔画的骨架还在,凑近就能猜出来 ——
+        而这个开关的用途恰恰是"旁边有人"。
+
+   改的思路是**别去模糊字,直接不画字**:
+   HTML 侧 color:transparent 让字消失,再给元素一条背景色带顶上位置。
+   一次矩形填充,零残留信息,也没有任何逐像素的合成开销。
+   box-decoration-break:clone 管换行 —— 不写它的话,两行文字会被连成一个
+   横跨整行的大色块,反而暴露了"这里有多长一段话"。 */
+/* 后代也要一起打掉。父元素的 color:transparent 只靠**继承**传下去,
+   而任何自有声明都胜过继承值 —— .tag.warn 自己写了 color,于是打码后
+   父元素画出一条色带,上面清清楚楚印着「名字很像:张伟」。
+   !important 不会传染给后代,所以必须显式覆盖。 */
+body.masked .blurable *{color:transparent !important}
+
+body.masked .blurable:not(.avatar){
+  color:transparent !important;
+  background:var(--dim);
+  border-radius:var(--r-xs);
+  -webkit-box-decoration-break:clone;
+  box-decoration-break:clone;
+  /* 块级的 .blurable(.nm / .meta / .sub / h3)不加这一条会铺成一整行灰条,
+     像整块被涂掉;贴着文字宽度才是"这里有个名字,但你看不到"。
+     行内的(.tag / <b>)本来就是收缩的,这条对它们是空操作。 */
+  width:fit-content;max-width:100%;
+  -webkit-user-select:none;user-select:none;
 }
+/* .avatar 必须排除掉,两个理由:
+   ① 它是 border-radius:50% 的圆,套上面那条背景会被画成方块;
+   ② 它的 background 是运行时算出来的球色(内联在元素上,数据驱动)——
+      留着它,打码后仍然能靠颜色区分派系,只是认不出是谁。这正是想要的。 */
+body.masked .avatar.blurable{color:transparent !important}
+
+/* SVG 的 <text> 不吃 background,得换一招:
+   paint-order:normal(先填充、后描边,描边压在字面上)+ 一条**和填充同色**的
+   粗描边,把笔画之间的白全填死,相邻的字就连成一条实心带 —— 和 HTML 侧
+   那条色带是同一个样子。0.58em 正好是一个中文字的宽度(CHAR_W),
+   用 em 而不是 px 是因为这几处字号都带着 / var(--gscale) 的反向补偿,
+   写死 px 会在缩放后忽粗忽细。
+
+   两个属性必须一起翻:.nm 平时是 paint-order:stroke + 深色描边(描边在下,
+   给名字垫个底)。只改颜色不改 paint-order 的话,得到的是一圈粗色边框
+   加中间一个清清楚楚的白字。
+
+   选择器里带上 #svg 不是随手写的:浅色主题那条
+   `:root[data-theme="light"] .node .nm{stroke:#fff;stroke-width:...}`
+   有四个类,单靠 `body.masked .node .nm`(三个类)会**输给它** ——
+   于是浅色主题下打码整个失效。用一个 id 把特指度抬上去,比满屏 !important 干净。 */
+body.masked #svg .node .nm,
+body.masked #svg .node .ini,
+body.masked #svg .elabel{
+  paint-order:normal;
+  stroke-width:0.58em;
+  stroke-linejoin:round;
+}
+body.masked #svg .node .nm{stroke:var(--text)}
+body.masked #svg .node .ini{stroke:var(--node-ink)}
+body.masked #svg .elabel{stroke:var(--text)}
+
+/* UA 默认给 dialog 的 margin/border/padding 要清掉。
+   不设 ::backdrop —— 非模态 dialog 本来就没有。 */
+#toast{
+  position:fixed;left:50%;bottom:calc(104px + var(--safe-b));right:auto;top:auto;
+  transform:translateX(-50%);margin:0;border:0;
+  background:var(--text);color:var(--bg-0);font-weight:var(--fw-med);
+  padding:9px 17px;border-radius:var(--r-md);font-size:var(--fs-small);
+  box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:86vw;width:max-content;
+  text-align:center;
+}
+#toast:not([open]){display:none}
+#toast b{text-decoration:underline;text-underline-offset:2px}
 #busy{
   position:fixed;inset:0;z-index:90;display:flex;
   align-items:center;justify-content:center;

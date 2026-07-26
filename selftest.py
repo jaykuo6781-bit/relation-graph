@@ -13,6 +13,7 @@ demo_seed.json 里的关系不是随手编的:它预埋了已知的派系结构�
 
 import json
 import os
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -147,6 +148,260 @@ def main():
         ({"陈国栋", "周文彬", "许宏伟"}, "三巨头互相敌对"),
     ):
         check(f"公司圈找到不稳定三角:{label}", frozenset(members) in got_c)
+
+    # ---------------- 局势页:派系名字与可复述的矛盾(v6) ----------------
+    print("\n局势页:派系有名字,矛盾能复述")
+    check("每个派系都有非空名字(UI 上不能再出现「#3 派系」)",
+          all(f.get("label") for f in fac["factions"]),
+          f"实际 {[f.get('label') for f in fac['factions']]}")
+    by_core = {f["core"]["name"]: f for f in fac["factions"] if f["core"]}
+    check("主体部门过六成的派系按部门起名",
+          by_core.get("陈国栋", {}).get("label") == "技术部一系",
+          f"实际 {by_core.get('陈国栋', {}).get('label')!r}")
+    # 财务派是 5 个人里 3 个财务部 —— 正好卡在六成线上,把 >= 写成 > 就翻
+    check("刚好卡在六成线上的派系也按部门起名(判据是 ≥ 不是 >)",
+          by_core.get("许宏伟", {}).get("label") == "财务部一系",
+          f"实际 {by_core.get('许宏伟', {}).get('label')!r}")
+
+    TEN = fac["tensions"]
+    need = ("a_label", "b_label", "a_size", "b_size",
+            "fronts", "worst", "share", "pairs")
+    check("tensions 字段齐全(裸 hostility 印在屏幕上等于没印)",
+          bool(TEN) and all(all(k in t for k in need) for t in TEN),
+          f"缺 {[k for k in need if TEN and k not in TEN[0]]}")
+    check("share 加起来是 100%",
+          98 <= sum(t["share"] for t in TEN) <= 102,
+          f"实际 {sum(t['share'] for t in TEN)}")
+    check("worst 落在 1..3(它要被翻译成「势不两立」这种词)",
+          all(1 <= t["worst"] <= 3 for t in TEN))
+    check("pairs 恰好是 fronts 截到前 8 —— 少一条就是漏了一组对立",
+          all(len(t["pairs"]) == min(t["fronts"], 8) for t in TEN),
+          f"实际 {[(t['fronts'], len(t['pairs'])) for t in TEN]}")
+    fmem = {f["id"]: {m["id"] for m in f["members"]} for f in fac["factions"]}
+    # 把 a/b 装反了屏幕上照样是一句通顺的话,只有断言能抓
+    check("pairs 里 a_name 一定来自 a 那一派,「A方 ↔ B方」不会读反",
+          all(p["a_id"] in fmem[t["a"]] and p["b_id"] in fmem[t["b"]]
+              for t in TEN for p in t["pairs"]))
+    check("pairs 按狠度排,最深的一处在最前面",
+          all([p["w"] for p in t["pairs"]] ==
+              sorted(p["w"] for p in t["pairs"]) for t in TEN))
+
+    ordk_t = lambda t: (-t["hostility"], -t["fronts"], t["a"], t["b"])  # noqa: E731
+    check("矛盾按声明的全序排,不靠字典插入序",
+          [ordk_t(t) for t in TEN] == sorted(ordk_t(t) for t in TEN))
+    sig = lambda d: [(t["a"], t["b"], t["hostility"]) for t in d["tensions"]]  # noqa: E731
+    check("连跑两次 detect_factions,矛盾的顺序和数值完全一致",
+          sig(fac) == sig(analysis.detect_factions(cid)),
+          f"实际 {sig(fac)}")
+
+    # 只有真出现平局,排序确定性才测得出来。造三个派系:
+    #   大派(4 人) vs 中派(3 人):一条 -3      → 敌意 3,1 组人对上
+    #   大派(4 人) vs 小派(2 人):-1 加 -2      → 敌意 3,2 组人对上
+    # 两边敌意总量一样,而 itertools.combinations 天然把「大 vs 中」排在前面。
+    # 只按 -hostility 排(稳定排序)就会保留那个顺序,战线更多的反而靠后。
+    tie_c = db.create_circle("_矛盾平局测试", "自定义")
+    tp = {n: db.upsert_person(n, circle_id=tie_c)[0] for n in
+          ("大一测", "大二测", "大三测", "大四测",
+           "中一测", "中二测", "中三测", "小一测", "小二测")}
+    for x, y in (("大一测", "大二测"), ("大一测", "大三测"), ("大一测", "大四测"),
+                 ("中一测", "中二测"), ("中一测", "中三测"), ("小一测", "小二测")):
+        db.upsert_relation(tie_c, tp[x], tp[y], "朋友", 3)
+    db.upsert_relation(tie_c, tp["大一测"], tp["中一测"], "敌对", -3)
+    db.upsert_relation(tie_c, tp["大二测"], tp["小一测"], "竞争", -1)
+    db.upsert_relation(tie_c, tp["大三测"], tp["小二测"], "利益冲突", -2)
+    tf = analysis.detect_factions(tie_c)
+    tt = tf["tensions"]
+    check("平局场景确实构造出来了(三个派系、两组敌意相等的矛盾)",
+          len(tf["factions"]) == 3 and len(tt) == 2
+          and tt[0]["hostility"] == tt[1]["hostility"] == 3,
+          f"实际 {[(t['hostility'], t['fronts']) for t in tt]}")
+    check("敌意总量打平时,战线更多的那组排前面",
+          [t["fronts"] for t in tt] == [2, 1],
+          f"实际 {[t['fronts'] for t in tt]} —— 只按 -hostility 排就是 [1, 2]")
+    check("平局时的顺序符合声明的全序",
+          [ordk_t(t) for t in tt] == sorted(ordk_t(t) for t in tt))
+    check("平局时两次运行给出同一个顺序",
+          [(t["a"], t["b"]) for t in analysis.detect_factions(tie_c)["tensions"]]
+          == [(t["a"], t["b"]) for t in tt])
+    check("没有部门可依据时改用核心人物起名",
+          all(f["label"].endswith("一派") for f in tf["factions"]),
+          f"实际 {[f['label'] for f in tf['factions']]}")
+    db.delete_circle(tie_c)
+    for pid in tp.values():
+        db.delete_person(pid)
+
+    # ---------------- 关键人物榜 ----------------
+    print("\n关键人物榜(README 宣传了四年,前端一直够不着)")
+    krows = analysis.key_people(30, cid)["people"]
+    check("榜首的中介中心性就是 100%",
+          bool(krows) and krows[0]["betweenness_pct"] == 100.0,
+          f"实际 {krows[0]['betweenness_pct'] if krows else None}")
+    check("中介中心性单调不增",
+          all(krows[i]["betweenness"] >= krows[i + 1]["betweenness"]
+              for i in range(len(krows) - 1)))
+    check("百分比和绝对值同向(不会一个降一个升)",
+          all(krows[i]["betweenness_pct"] >= krows[i + 1]["betweenness_pct"]
+              for i in range(len(krows) - 1)))
+
+    lin = db.find_person_by_name("林子豪")
+    keyf = lambda t: frozenset(m["id"] for m in t["members"])  # noqa: E731
+    tri_all = analysis.unstable_triangles(limit=999, circle_id=cid)
+    tri_foc = analysis.unstable_triangles(limit=999, focus_id=lin["id"],
+                                          circle_id=cid)
+    want = {keyf(t) for t in tri_all["triangles"] if lin["id"] in keyf(t)}
+    check("林子豪确实卷在不稳定三角里(不然下面两条是白测的)", bool(want))
+    check("focus 的三角恰好是全局结果里含他的那些",
+          {keyf(t) for t in tri_foc["triangles"]} == want,
+          f"focus {len(tri_foc['triangles'])} / 全局含他 {len(want)}")
+    check("focus 查询的 total 也只数含他的那些",
+          tri_foc["total"] == len(want),
+          f"实际 {tri_foc['total']} vs {len(want)}")
+
+    # ---------------- 可结盟评分:换掉大面积同分的老公式(v6) ----------------
+    print("\n可结盟评分:把同分打散")
+    cands = allies["candidates"]
+    check("评分值域 0~100(可以当百分比直接说)",
+          all(0 <= c["score"] <= 100 for c in cands),
+          f"实际 {[c['score'] for c in cands]}")
+    ordk_c = lambda r: (-r["score"], -r["conflict"],           # noqa: E731
+                        -r["affinity"], r["id"])
+    shuffled = list(cands)
+    random.Random(20260726).shuffle(shuffled)
+    check("打乱后按声明的全序重排,序列与函数输出逐个相同",
+          [r["id"] for r in sorted(shuffled, key=ordk_c)] ==
+          [r["id"] for r in cands],
+          "analysis 里的 sort key 跟这里声明的不是同一个 —— 排名不可复现")
+
+    # 造一个"大面积同分"的场景:5 个人跟靶子的矛盾一样深、跟我一样没交情。
+    # 旧公式 conflict×(3+affinity) 给他们一模一样的分,而 UI 上排第一的那个
+    # 会被读成"第一人选" —— 那其实只是录入顺序。
+    sc = db.create_circle("_同分测试", "自定义")
+    tgt = db.upsert_person("靶子测", circle_id=sc)[0]
+    my = db.upsert_person("我方测", circle_id=sc)[0]
+    hub = db.upsert_person("枢纽测", circle_id=sc)[0]
+    cand_ids, leaf_ids = [], []
+    for i in range(1, 6):
+        c = db.upsert_person(f"候选{i}测", circle_id=sc)[0]
+        cand_ids.append(c)
+        db.upsert_relation(sc, c, tgt, "敌对", -2)      # 矛盾深度全一样
+        db.upsert_relation(sc, hub, c, "朋友", 2)
+        for j in range(i):                              # 跟班数各不相同 ——
+            leaf = db.upsert_person(f"跟班{i}{j}测", circle_id=sc)[0]
+            leaf_ids.append(leaf)                       # 中介中心性因此互不相等
+            db.upsert_relation(sc, c, leaf, "朋友", 1)
+    foe = db.upsert_person("死敌测", circle_id=sc)[0]
+    db.upsert_relation(sc, foe, tgt, "敌对", -2)
+    db.upsert_relation(sc, my, foe, "敌对", -3)         # 我跟他也势不两立
+
+    # 再放两个各方面完全对称的人:新公式也必然给他们同一个分数。
+    # 名字故意让 SQLite 的 ORDER BY dept,name 把「乙」排在「甲」前面
+    # (乙 U+4E59 < 甲 U+7532),而 id 是甲小 —— 于是"按 id 兜底"和
+    # "保留遍历顺序"会给出**相反**的结果,下面那条重排用例才测得出东西。
+    even_a = db.upsert_person("甲同分测", circle_id=sc)[0]
+    even_b = db.upsert_person("乙同分测", circle_id=sc)[0]
+    for pid in (even_a, even_b):
+        db.upsert_relation(sc, pid, tgt, "敌对", -2)
+
+    res = analysis.enemies_of_enemy(tgt, my, circle_id=sc)["candidates"]
+    new_scores = [c["score"] for c in res]
+    old_scores = [round(c["conflict"] * (3 + c["affinity"]), 2) for c in res]
+    new_rate = len(set(new_scores)) / len(new_scores)
+    old_rate = len(set(old_scores)) / len(old_scores)
+    check("这个场景下旧公式确实大面积同分(否则这组用例是白测的)",
+          old_rate < 1.0, f"旧公式区分度 {old_rate:.2f}")
+    check("新公式的区分度严格优于旧公式",
+          new_rate > old_rate, f"新 {new_rate:.2f} / 旧 {old_rate:.2f}")
+    check("打散同分靠的是 clout,它在这五个人身上各不相同",
+          len({c["clout"] for c in res if c["id"] in cand_ids}) == len(cand_ids),
+          f"实际 {[(c['name'], c['clout']) for c in res]}")
+    zero = [c for c in res if c["id"] == foe]
+    check("affinity == -3(我跟他也势不两立)时得 0 分,零点性质没丢",
+          len(zero) == 1 and zero[0]["affinity"] == -3 and zero[0]["score"] == 0,
+          f"实际 {zero}")
+    check("合成场景里评分也不越出 0~100",
+          all(0 <= c["score"] <= 100 for c in res))
+    even = [c for c in res if c["id"] in (even_a, even_b)]
+    check("完全对称的两个人得分确实相同(否则下一条测不到平局)",
+          len(even) == 2 and even[0]["score"] == even[1]["score"],
+          f"实际 {[(c['name'], c['score']) for c in even]}")
+    check("真出现平局时按 id 兜底,不保留遍历顺序",
+          [c["id"] for c in even] == [even_a, even_b],
+          f"实际 {[c['name'] for c in even]} —— 只按 -score 排的话是反的")
+    shuf2 = list(res)
+    random.Random(31337).shuffle(shuf2)
+    check("合成场景打乱后重排,序列也与函数输出逐个相同",
+          [r["id"] for r in sorted(shuf2, key=ordk_c)] == [r["id"] for r in res])
+
+    # ---------------- 局势页汇总:共享 g 不能算出不一样的结果 ----------------
+    print("\n局势页汇总")
+    sit = analysis.situation(cid)
+    check("五块齐全",
+          all(k in sit for k in
+              ("me", "factions", "tensions", "key_people", "triangles")),
+          f"实际 {list(sit)}")
+    check("共享同一个 g 算出来的三块,与各自单独跑逐字相同",
+          sit["factions"] == analysis.detect_factions(cid)["factions"]
+          and sit["tensions"] == analysis.detect_factions(cid)["tensions"]
+          and sit["key_people"] == analysis.key_people(20, cid)["people"]
+          and sit["triangles"] == analysis.unstable_triangles(
+              limit=8, circle_id=cid)["triangles"],
+          "共用 g 时有算法把它改坏了")
+    check("我的处境里带派系、对手名单和绕不开程度排名",
+          sit["me"] and sit["me"]["faction"]["label"]
+          and isinstance(sit["me"]["rivals"], list)
+          and 1 <= sit["me"]["rank"] <= sit["me"]["total"],
+          f"实际 {sit['me']}")
+    check("我这派正在对抗的那一方,不是我自己这派",
+          sit["me"]["front"] is None
+          or sit["me"]["front"]["faction_id"] != sit["me"]["faction"]["id"],
+          f"实际 {sit['me']['front']}")
+    # 共享 g 唯一的作用是省时间,输出一模一样 —— 所以只能靠数调用次数来钉。
+    # 不钉的话哪天有人顺手把 g= 删掉,测试全绿,接口悄悄慢一倍。
+    calls = {"graph": 0, "brandes": 0}
+    _bg, _br = analysis.build_graph, analysis._brandes
+
+    def _count_bg(*a, **k):
+        calls["graph"] += 1
+        return _bg(*a, **k)
+
+    def _count_br(*a, **k):
+        calls["brandes"] += 1
+        return _br(*a, **k)
+
+    analysis.build_graph, analysis._brandes = _count_bg, _count_br
+    try:
+        analysis.situation(cid)
+        sit_calls = dict(calls)
+        calls.update(graph=0, brandes=0)
+        analysis.brief(zhou["id"], cid)
+        brief_calls = dict(calls)
+    finally:
+        analysis.build_graph, analysis._brandes = _bg, _br
+    check("局势页全程只建一次图、只跑一次 Brandes",
+          sit_calls == {"graph": 1, "brandes": 1}, f"实际 {sit_calls}")
+    check("brief 也只建一次图(以前是 5 次)",
+          brief_calls == {"graph": 1, "brandes": 1}, f"实际 {brief_calls}")
+
+    sit_sc = analysis.situation(sc)
+    check("圈子里没有我时 me 是 null 而不是崩",
+          sit_sc["me"] is None and sit_sc["me_missing"] == "outside",
+          f"实际 me={sit_sc['me']} missing={sit_sc['me_missing']}")
+    sc_headcount = len(db.list_people(sc))
+    check("关键人物只给 Top 20(这个圈子人比 20 多)",
+          sc_headcount > 20 and len(sit_sc["key_people"]) == 20,
+          f"圈内 {sc_headcount} 人,榜单 {len(sit_sc['key_people'])} 条")
+    # 结果要原样进 layout_cache(json.dumps),而 g 里躺着一个 set(mixed)。
+    # 哪天不小心把它漏出去,接口只会在缓存未命中的那一次 500 —— 本地看不出来。
+    try:
+        json.dumps(sit, ensure_ascii=False)
+        ser_ok, ser_err = True, ""
+    except TypeError as e:
+        ser_ok, ser_err = False, str(e)
+    check("局势页结果能直接 json 序列化(cache_put 要用)", ser_ok, ser_err)
+
+    db.delete_circle(sc)
+    for pid in ([tgt, my, hub, foe, even_a, even_b] + cand_ids + leaf_ids):
+        db.delete_person(pid)
 
     # ---------------- 同学圈:情感关系 ----------------
     print("\n同学圈(情感关系)")
