@@ -262,6 +262,20 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
+console.log("\n整体骨架(误删过一次)");
+{
+  const c = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  /* 少了这两行,#views{flex:1} 没有 flex 父容器会塌成 0 高:
+     底栏直接贴到顶栏下面、内容区一片纯黑。页面不报任何错。 */
+  check("body 是纵向 flex(顶栏 + 可伸缩内容区 + 底栏)",
+        /\bbody\{[^}]*display:flex/.test(c) &&
+        /\bbody\{[^}]*flex-direction:column/.test(c),
+        "#views{flex:1} 会塌成 0 高");
+  check("body 有背景色和文字色", /\bbody\{[^}]*background:var\(--bg-0\)/.test(c));
+  check("#views 撑满剩余空间", /#views\{[^}]*flex:1/.test(c));
+  check("html,body 高度 100%", /html,body\{[^}]*height:100%/.test(c));
+}
+
 console.log("\n页面缩放:能做的和做不到的");
 {
   /* iOS Safari 从 iOS 10 起故意忽略 user-scalable=no,所以只能靠 CSS 锁。

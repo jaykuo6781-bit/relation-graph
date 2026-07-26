@@ -160,6 +160,17 @@ html,body{
   -webkit-text-size-adjust:100%;   /* 横竖屏切换时 Safari 会自作主张放大字号 */
 }
 
+body{
+  background:var(--bg-0);color:var(--text);
+  font:var(--fs-body)/var(--lh-normal) -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",
+       "Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  /* 整个应用是"顶栏 + 可伸缩内容区 + 底栏"的纵向 flex。
+     少了这两行,#views{flex:1} 就没有 flex 父容器,会塌成 0 高 ——
+     表现是底栏直接贴到顶栏下面、下面一片纯黑。(我误删过一次。) */
+  display:flex;flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+
 /* 按每块区域**实际需要**的手势逐个给,而不是一律 manipulation ——
    manipulation 等价于 pan-x pan-y pinch-zoom,**它是允许双指缩放的**,
    只挡双击。真正能挡住捏合的是 none(什么都不给)或 pan-y(只给纵向滚动)。
