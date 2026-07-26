@@ -625,6 +625,24 @@ const GraphView = (() => {
     let sdist = 0, sscale = 1, pivot = null;
     const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 
+    /* iOS Safari 从 iOS 10 起就**忽略** <meta viewport> 里的 user-scalable=no
+       和 maximum-scale(为了辅助功能)。双指捏合时它同时派发 touch 事件
+       (下面这些handler 处理了)和 Safari 私有的 gesture 事件(没人拦)——
+       于是我们缩放了图,Safari 又把**整个页面**缩放了一遍。
+       真机表现:顶栏的圈子名被挤出屏幕、图例/输入栏/底栏全不见,
+       图看起来"卡住"了,而且退不回去。
+
+       touch-action:none 管不到 gesture 事件,唯一可靠的拦法就是
+       preventDefault 掉它们。只在 #stage 上拦 —— 设置页那些小字
+       还是该让人能放大看的。 */
+    for (const t of ["gesturestart", "gesturechange", "gestureend"]) {
+      stage.addEventListener(t, e => e.preventDefault(), { passive: false });
+    }
+    /* 双击缩放同理:iOS 上双击会放大页面,而在图上双击是很自然的动作
+       (想放大看某个人)。touch-action:manipulation 就是专门关这个的,
+       但 #stage 已经是 none(更严格),这里只补上 dblclick 的兜底。 */
+    stage.addEventListener("dblclick", e => e.preventDefault());
+
     stage.addEventListener("touchstart", e => {
       if (e.touches.length === 1) {
         mode = "pan"; moved = false;

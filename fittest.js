@@ -329,8 +329,8 @@ console.log("\n卡片迁到原生 <dialog>");
   check("::backdrop 有压暗(深色下卡片和背景分层全靠它)",
         /\.sheet::backdrop\{[^}]*background/.test(css));
   check("深色下有顶缘高光线,浅色下关掉",
-        /\.sheet::before\{/.test(css) &&
-        /\[data-theme="light"\] \.sheet::before\{display:none\}/.test(css));
+        /\.sheet-card::before\{/.test(css) &&
+        /\[data-theme="light"\] \.sheet-card::before\{display:none\}/.test(css));
   check("滚动容器有 overscroll-behavior:contain(否则滚到底会带动整页)",
         /\.sheet-body\{[^}]*overscroll-behavior:contain/.test(css));
 
@@ -1520,6 +1520,44 @@ console.log("\n模板里的引用能不能对上(只有静态检查抓得到)");
   const dead = [...new Set(called)].filter(f => !decl.has(f) && !known.has(f));
   check(`每个 onclick="fn(" 都能找到 fn(用到 ${new Set(called).size} 个)`,
         dead.length === 0, "没定义:" + dead.join(", "));
+}
+
+console.log("\n卡片定位与 dialog 的显隐(真机上栽过两次)");
+{
+  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+  const gjs = fs.readFileSync(path.join(__dirname, "web", "graph.js"), "utf8");
+
+  /* ① 直接给 dialog 写 bottom:0 时,iOS Safari 的固定定位底边落在浏览器
+     工具栏**下面** —— 卡片一大截藏在工具栏后,只露出顶上一条。 */
+  check("dialog 是铺满视口的容器,卡片是内层 .sheet-card",
+        /<div class="sheet-card">/.test(html));
+  check("容器高度用 svh 而不是 dvh / bottom:0",
+        /\.sheet\{[^}]*height:100svh/.test(css));
+  check("有 svh 不支持时的回退", /@supports not \(height: 100svh\)/.test(css));
+  check("容器把卡片顶到底边", /\.sheet\{[^}]*justify-content:flex-end/.test(css));
+  check("拖动写的是卡片的 transform,不是容器的",
+        /card\.style\.transform = `translateY/.test(appjs));
+
+  /* ② <dialog> 关闭时靠默认样式表的 dialog:not([open]){display:none} 隐藏,
+     而任何类/id 选择器写的 display 都盖得掉它 —— 于是一个 position:fixed
+     的透明层永远铺在页面上,吞掉所有点击、拖动和滚动,页面看着完全正常。
+     这个坑真机上踩过:表现为"什么都点不动"。 */
+  for (const [name, sel] of [["sheet", "\\.sheet"], ["toast", "#toast"]]) {
+    const setsDisplay = new RegExp(sel + "\\{[^}]*display:").test(css);
+    check(`${name}: 给 dialog 写了 display 就必须补 :not([open])`,
+          !setsDisplay || new RegExp(sel + ":not\\(\\[open\\]\\)\\{display:none\\}").test(css),
+          "关闭状态下它会铺满视口吞掉所有交互");
+  }
+
+  /* ③ iOS Safari 忽略 user-scalable=no。双指捏合会同时派发 touch 事件
+     (我们处理了)和 Safari 私有的 gesture 事件(不拦就缩放整个页面)。
+     touch-action:none 管不到 gesture 事件。 */
+  for (const ev of ["gesturestart", "gesturechange", "gestureend"]) {
+    check(`拦住了 ${ev}`, new RegExp(`"${ev}"`).test(gjs));
+  }
+  check("gesture 监听是 passive:false(passive 下 preventDefault 无效)",
+        /gesturestart[\s\S]{0,240}passive: false/.test(gjs));
 }
 
 console.log("\n" + "=".repeat(52));

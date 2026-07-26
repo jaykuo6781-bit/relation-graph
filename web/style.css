@@ -483,11 +483,30 @@ button{font-family:inherit;color:inherit}
 
 /* ---------------- 卡片(原生 dialog) ---------------- */
 
+/* dialog 只当容器:铺满视口、透明、不画任何东西,把卡片顶到底边。
+   高度用 100svh —— small viewport height 是"浏览器工具栏展开时"的视口高度,
+   也就是最小的那个。用 dvh 或 bottom:0 时,iOS Safari 的固定定位底边落在
+   工具栏**下面**,卡片有一大截藏在工具栏后面,只露出顶上一条。 */
 .sheet{
-  /* UA 默认给 dialog 的 width:fit-content / max-width:calc(100%-6px-2em) /
-     margin:auto / border / padding 必须全部显式清掉,否则布局会莫名其妙 */
-  position:fixed;inset:auto 0 0 0;margin:0 auto;padding:0;
-  width:100%;max-width:600px;max-height:82dvh;
+  position:fixed;inset:0;margin:0;padding:0;border:0;
+  width:100%;max-width:none;height:100svh;max-height:100svh;
+  background:transparent;box-shadow:none;overflow:hidden;
+  display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
+}
+/* ⚠ 这一条不能少。<dialog> 关闭时是靠浏览器默认样式表里的
+   `dialog:not([open]){display:none}` 隐藏的,而上面那句 display:flex
+   是类选择器 —— 优先级高于默认样式表,会把它盖掉。后果:一个
+   position:fixed;inset:0 的透明层永远铺在整个页面上,吞掉所有点击、
+   拖动和滚动,而且看不出来。
+   凡是给 dialog 写了 display 的地方,都必须补这一条(#toast 同理)。 */
+.sheet:not([open]){display:none}
+
+@supports not (height: 100svh){        /* iOS 15.4 没有 svh,退回 -webkit-fill-available */
+  .sheet{height:-webkit-fill-available;max-height:-webkit-fill-available}
+}
+
+.sheet-card{
+  position:relative;width:100%;max-width:600px;max-height:82%;
   display:flex;flex-direction:column;overflow:hidden;
   background:var(--bg-1);color:var(--text);
   border:1px solid var(--line);border-bottom:0;
@@ -500,19 +519,16 @@ button{font-family:inherit;color:inherit}
    ② 顶缘一道 1px 高光,模拟光从上方来 —— 深色 UI 分层的主力
    ③ 表面比背景亮一档(--bg-1 > --bg-0)
    浅色下反过来:高光线没意义,--shadow 才是主力,所以 ① ② 只在深色生效。 */
-.sheet::before{
+.sheet-card::before{
   content:"";position:absolute;left:0;right:0;top:0;height:1px;z-index:2;
   background:linear-gradient(90deg,transparent,rgba(255,255,255,.16) 22%,
              rgba(255,255,255,.16) 78%,transparent);
   pointer-events:none;
 }
-:root[data-theme="light"] .sheet::before{display:none}
+:root[data-theme="light"] .sheet-card::before{display:none}
 .sheet::backdrop{background:rgba(4,6,14,.58)}
 :root[data-theme="light"] .sheet::backdrop{background:rgba(20,25,45,.28)}
 
-/* 关闭按钮和把手固定在顶部。以前它们在滚动容器里,人物卡片内容很长,
-   往下滚两屏 ✕ 就消失了,而这个卡片当时既没有遮罩也没有 Esc —— 
-   想关掉只能一路滚回顶部。 */
 .sheet-head{
   position:relative;flex:none;padding:var(--sp-2) var(--sp-4) 0;
   background:var(--bg-1);z-index:1;
@@ -538,17 +554,17 @@ button{font-family:inherit;color:inherit}
 /* 入场 / 退场。退场在 Safari 17.5 以下不能靠 @starting-style + allow-discrete,
    所以用"加 .closing → 等 animationend → 真 close()"这个全版本可用的老办法。
    以前只有入场没有退场,卡片是瞬间消失的 —— 那种不对称很容易被读作"没做完"。 */
-.sheet[open]{animation:rise .22s cubic-bezier(.2,.8,.3,1)}
+.sheet[open] .sheet-card{animation:rise .22s cubic-bezier(.2,.8,.3,1)}
 .sheet[open]::backdrop{animation:fadein .22s ease}
-.sheet.closing{animation:sink .16s ease-in forwards}
+.sheet.closing .sheet-card{animation:sink .16s ease-in forwards}
 .sheet.closing::backdrop{animation:fadeout .16s ease forwards}
 @keyframes rise{from{transform:translateY(28px);opacity:0}to{transform:none;opacity:1}}
 @keyframes sink{to{transform:translateY(28px);opacity:0}}
 @keyframes fadein{from{opacity:0}to{opacity:1}}
 @keyframes fadeout{to{opacity:0}}
-.sheet.dragging{animation:none;transition:none}
+.sheet.dragging .sheet-card{animation:none;transition:none}
 @media (prefers-reduced-motion: reduce){
-  .sheet[open],.sheet.closing,
+  .sheet[open] .sheet-card,.sheet.closing .sheet-card,
   .sheet[open]::backdrop,.sheet.closing::backdrop{animation:none}
 }
 
@@ -834,9 +850,9 @@ body.masked #svg .elabel{stroke:var(--text)}
   #tabbar{justify-content:center;gap:8px}
   .navbtn{flex:0 0 130px}
   #legend{left:22px}
-  .sheet{
-    inset:auto 0 var(--sp-4) 0;
+  .sheet{padding-bottom:var(--sp-4)}
+  .sheet-card{
     border-radius:var(--r-2xl);border-bottom:1px solid var(--line);
-    max-height:76dvh;
+    max-height:76%;
   }
 }
