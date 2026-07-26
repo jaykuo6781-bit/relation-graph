@@ -167,6 +167,12 @@ button{font-family:inherit;color:inherit}
     radial-gradient(ellipse 96% 78% at 50% 46%,
       var(--stage-in) 0%, var(--stage-out) 78%);
   touch-action:none;
+  /* 长按拖动会撞上 iOS 的"长按选词":SVG 里的名字是真文字,Safari 会把它
+     连同周围一片一起选蓝、还弹出拷贝菜单。图区本来也没有需要选的文字,
+     整个关掉。输入框和卡片在 #stage 之外,不受影响。 */
+  -webkit-user-select:none;user-select:none;
+  -webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
 }
 :root[data-theme="light"] #stage{
   background:
@@ -259,15 +265,19 @@ button{font-family:inherit;color:inherit}
 /* ---- 拖动中 ---- */
 .node.dragging{cursor:grabbing}
 .node.dragging .rim{stroke-opacity:1;stroke-width:2.6}
+.node .ball{transition:transform .18s ease}
 .node.dragging .ball{
   transform:scale(1.08);transform-origin:center;transform-box:fill-box;
 }
+/* 松手后正在飘回原位:亮边留一点余亮,让人看清是"哪一个"在往回走 */
+.node.returning .rim{stroke-opacity:.75}
 /* 拖的时候一切过渡都关掉 —— 边跟着手走必须是即时的,慢半拍就"拖泥带水" */
 #svg.has-drag *{transition:none !important}
 
 @media (prefers-reduced-motion: reduce){
   .edge,.elabel,#svg.focused .node,#svg.focused .eg,
-  #svg.hovering .node,#svg.hovering .eg,.node.hot .glow{transition:none}
+  #svg.hovering .node,#svg.hovering .eg,.node.hot .glow,
+  .node .ball{transition:none}
 }
 
 .empty{

@@ -115,6 +115,24 @@ function toggleTheme() {
 /* ---------------- 启动 ---------------- */
 
 async function boot() {
+  // 双击 index.html 打开时地址是 file:///…,浏览器不让页面读数据,
+  // 样式和脚本也加载不到。与其让人对着一堆报错发愣,不如直接说清楚。
+  if (location.protocol === "file:") {
+    const url = "http://127.0.0.1:8787/";
+    document.body.innerHTML =
+      '<div style="font:15px/1.9 -apple-system,\'Segoe UI\',system-ui,sans-serif;' +
+      'max-width:620px;margin:60px auto;padding:0 22px;color:#1a1a1a">' +
+      '<h2 style="font-size:19px;margin:0 0 14px">要通过服务打开,不能双击文件</h2>' +
+      '<p style="margin:0 0 14px">你现在的地址是 <code>file:///…</code>。' +
+      '这样打开时浏览器不允许页面读取数据,样式和脚本也加载不到。</p>' +
+      '<p style="margin:0 0 8px">先双击运行 <code>run.bat</code>,然后打开:</p>' +
+      '<p style="margin:0 0 20px"><a href="' + url + '" style="font-size:16px">' +
+      url + '</a></p>' +
+      '<p style="margin:0;color:#666;font-size:13.5px">' +
+      '手机上是 <code>http://100.97.25.86:8787/</code>' +
+      '(需和电脑在同一个 Tailscale 网络里)。</p></div>';
+    return;
+  }
   initTheme();
   // 视觉强度档位。对比页定稿后把默认值改成用户选的那一档。
   GraphView.setStyle(GraphStyles[localStorage.getItem("gstyle") || "B"]);

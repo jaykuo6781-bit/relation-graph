@@ -79,7 +79,29 @@ function bboxOf(nodes, nameSize) {
 
 let payload = null;
 
+/* 双击文件打开时地址是 file:///…,浏览器既不让页面读数据,也加载不到
+   /style.css 和 /graph.js —— 页面会变成一堆没样式的黑字加一句
+   "Failed to fetch",看不出是怎么回事。这里直接说清楚。
+   注意这段不能依赖任何外部样式或脚本,因为那些恰好就是没加载上的东西。 */
+function fileProtocolNotice() {
+  const url = "http://127.0.0.1:8787/compare.html";
+  document.body.innerHTML =
+    '<div style="font:15px/1.9 -apple-system,\'Segoe UI\',system-ui,sans-serif;' +
+    'max-width:620px;margin:60px auto;padding:0 22px;color:#1a1a1a">' +
+    '<h2 style="font-size:19px;margin:0 0 14px">要通过服务打开,不能双击文件</h2>' +
+    '<p style="margin:0 0 14px">你现在的地址是 <code>file:///…</code>。' +
+    '这样打开时,浏览器不允许页面去读数据,样式和脚本也加载不到 —— ' +
+    '所以才是现在这个样子。</p>' +
+    '<p style="margin:0 0 8px">把地址换成这个(前提是 <code>run.bat</code> 正在运行):</p>' +
+    '<p style="margin:0 0 20px"><a href="' + url + '" ' +
+    'style="font-size:16px">' + url + '</a></p>' +
+    '<p style="margin:0;color:#666;font-size:13.5px">' +
+    '手机上则是 <code>http://100.97.25.86:8787/compare.html</code>' +
+    '(需和电脑在同一个 Tailscale 网络里)。</p></div>';
+}
+
 async function boot() {
+  if (location.protocol === "file:") { fileProtocolNotice(); return; }
   const host = document.getElementById("panels");
   try {
     const st = await (await fetch("/api/state")).json();

@@ -43,6 +43,11 @@ const GraphView = (() => {
   let pendingMove = null, rafId = 0;
 
   const LONG_PRESS_MS = 500;      // 手机上长按多久才进入拖动(用户选的)
+  const RETURN_MS = 420;          // 松手后飘回原位用多久
+  const now = () => (typeof performance === "object" && performance.now)
+    ? performance.now() : Date.now();
+  const REDUCED_MOTION = typeof matchMedia === "function" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches;
   // 触屏没有"悬停"这回事;在触屏上装 mouseenter 只会换来点一下就卡住的高亮
   const CAN_HOVER = typeof matchMedia === "function" &&
     matchMedia("(hover: hover) and (pointer: fine)").matches;
@@ -174,7 +179,9 @@ const GraphView = (() => {
      (只碰被拖节点的度数个元素,不是全图)、用户主动触发的、手一松就停。
      再用 requestAnimationFrame 把同一帧内的多次移动事件合并成一次。
 
-     拖动结果**不落库**,刷新即回到算法排好的位置 —— 所以后端一行不用改。 */
+     松手后节点自己飘回算法排好的位置(见 releaseNode),所以拖动是一个
+     **查看**动作 —— 把某个球拽出来看清它连着谁,而不是重新摆放图。
+     位置既不改也不落库,后端一行不用动。 */
 
   function moveNode(pid, x, y) {
     const p = pos.get(pid), it = index.get(pid);
@@ -229,16 +236,68 @@ const GraphView = (() => {
     dragId = pid;
     clearHover();
     const it = index.get(pid);
-    if (it) it.g.classList.add("dragging");
+    if (it) { cancelReturn(it); it.g.classList.add("dragging"); }
     svg.classList.add("has-drag");
+    // 兜底:万一还是有一段被选中了(不同 iOS 版本行为不完全一致),清掉它
+    try {
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed) sel.removeAllRanges();
+    } catch (e) {}
   }
 
   function endDrag() {
     if (dragId == null) return;
-    const it = index.get(dragId);
+    const pid = dragId;
+    const it = index.get(pid);
     if (it) it.g.classList.remove("dragging");
     svg.classList.remove("has-drag");
     dragId = null;
+
+    // rAF 里可能还排着一次没落地的移动。不先清掉的话,归位动画已经起步了
+    // 它才执行,会把球"弹"回松手时的位置。这里立刻结算掉再开始归位。
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    if (pendingMove) {
+      const m = pendingMove; pendingMove = null;
+      if (m.pid === pid) moveNode(m.pid, m.x, m.y);
+    }
+    releaseNode(pid);
+  }
+
+  /* 松手后自己飘回算法排好的位置 —— Obsidian 就是这个手感:
+     节点被交还给力学模拟,慢慢回到平衡点。所以"拖动"是一个**查看**的动作
+     (把某个球拽出来看清它连着谁),而不是"重新摆放"。
+     这里没有物理模拟可交还,就用一段缓出动画走回去,效果一样。 */
+  function releaseNode(pid) {
+    const p = pos.get(pid), it = index.get(pid);
+    if (!p || !it) return;
+    if (p.x === p.ox && p.y === p.oy) return;      // 压根没动过
+
+    if (REDUCED_MOTION) {                          // 用户要求减少动效:直接归位
+      moveNode(pid, p.ox, p.oy);
+      it.g.removeAttribute("transform");
+      return;
+    }
+    const x0 = p.x, y0 = p.y, t0 = now();
+    it.g.classList.add("returning");
+    const step = () => {
+      const k = Math.min(1, (now() - t0) / RETURN_MS);
+      const e = 1 - Math.pow(1 - k, 3);            // 缓出:先快后慢
+      moveNode(pid, x0 + (p.ox - x0) * e, y0 + (p.oy - y0) * e);
+      if (k < 1) { it.ret = requestAnimationFrame(step); return; }
+      it.ret = 0;
+      it.g.removeAttribute("transform");
+      it.g.classList.remove("returning");
+    };
+    it.ret = requestAnimationFrame(step);
+  }
+
+  /* 归位动画是**每个节点各自一份**的 —— 上一个还在飘回去的时候
+     完全可以再抓起另一个,所以句柄存在各自的索引记录里,不能用全局变量。 */
+  function cancelReturn(it) {
+    if (!it || !it.ret) return;
+    cancelAnimationFrame(it.ret);
+    it.ret = 0;
+    it.g.classList.remove("returning");
   }
 
   /* 桌面:球上按下即进入拖动。松手时位移小于 4px 就当点击,照常弹卡片。
@@ -311,12 +370,13 @@ const GraphView = (() => {
     }, { passive: true });
   }
 
-  /* 复位按钮顺带把拖过的球放回算法排的位置 —— 反正拖动本来就不持久化,
-     "复位"理应恢复原状。返回值告诉调用方要不要提示一句。 */
+  /* 复位按钮的兜底:正常情况下松手就飘回去了,这里只处理"归位动画还在半路上
+     就点了复位"的情形 —— 直接掐掉动画归位,不让它跟贴合动画打架。 */
   function resetPositions() {
     if (!index || !pos || !data) return false;
     let moved = false;
     for (const [id, p] of pos) {
+      cancelReturn(index.get(id));
       if (p.x === p.ox && p.y === p.oy) continue;
       moved = true;
       p.x = p.ox; p.y = p.oy;

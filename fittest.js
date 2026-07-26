@@ -187,6 +187,26 @@ for (const sel of ["#svg.hovering", ".node.hot", ".node.dragging",
         "JS 会加这个 class,但 CSS 里没有它 —— 加了等于没加");
 }
 
+console.log("\n本轮补的三处(容易被后来的改动悄悄抹掉)");
+const gjs = fs.readFileSync(path.join(__dirname, "web", "graph.js"), "utf8");
+const cmp = fs.readFileSync(path.join(__dirname, "web", "compare.html"), "utf8");
+const ajs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+
+check("松手后会飘回原位(releaseNode + 逐节点的动画句柄)",
+      gjs.includes("function releaseNode") && gjs.includes("it.ret"),
+      "拖完不回位的话,图就被用户改乱了 —— 而位置根本没存");
+check("松手时先结算掉 rAF 里排队的那一帧",
+      /if \(rafId\) \{ cancelAnimationFrame\(rafId\); rafId = 0; \}/.test(gjs),
+      "不清掉的话归位动画起步后它才落地,球会弹回松手位置");
+check("图区禁用了 iOS 的长按选词",
+      /#stage\{[^}]*-webkit-user-select:\s*none/.test(css) &&
+      /#stage\{[^}]*-webkit-touch-callout:\s*none/.test(css),
+      "长按拖动会变成长按选词,整片图被选蓝");
+check("双击文件打开时,主界面会给出明确提示",
+      ajs.includes('location.protocol === "file:"'));
+check("双击文件打开时,对比页会给出明确提示",
+      cmp.includes('location.protocol === "file:"'));
+
 console.log("\n" + "=".repeat(52));
 console.log(`  通过 ${ok} / 失败 ${fail}`);
 console.log("=".repeat(52));
