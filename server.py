@@ -442,6 +442,11 @@ def main():
         print(f"    2. Safari 打开 http://{ts_ip}:{port}")
         print("    3. 点底部「分享」→「添加到主屏幕」")
         print("       之后从桌面图标打开就是全屏的,跟 App 一样")
+        if sys.platform == "win32":
+            print()
+            print("  手机打不开?多半是 Windows 防火墙拦了入站连接。")
+            print("  用管理员身份打开 PowerShell,在本目录执行:")
+            print("      .\\setup-firewall.ps1")
     elif allow_lan and lan_ip:
         print(f"  手机访问:  http://{lan_ip}:{port}   (局域网)")
         print()

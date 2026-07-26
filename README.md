@@ -58,6 +58,21 @@ Windows 上也可以直接双击 **`run.bat`**。
 3. 电脑上正常启动 `python server.py` —— 它会自动检测到 Tailscale 地址并打印出来
 4. 手机浏览器打开那个地址
 
+> **Windows 用户注意:第一次多半会连不上,是防火墙拦的。**
+> Windows 防火墙默认拦截入站连接,而 Python 安装时创建的放行规则通常只覆盖
+> Public 配置文件 —— 偏偏 Tailscale 网卡被归为 Private。表现是:电脑上
+> `127.0.0.1` 一切正常,手机却一直转圈。
+>
+> 用**管理员身份**打开 PowerShell,在项目目录执行一次即可:
+>
+> ```powershell
+> .\setup-firewall.ps1
+> ```
+>
+> 这条规则只放行 TCP 8787,且只接受来自 `100.64.0.0/10`(Tailscale 地址段)
+> 的连接 —— 局域网和公网依然进不来。撤销:
+> `Remove-NetFirewallRule -DisplayName "relation-graph (Tailscale only)"`
+
 ### 方式二:局域网(临时用)
 
 手机和电脑连同一个 Wi-Fi 即可,但**同网络的其他人也能访问**。
@@ -204,6 +219,7 @@ llm.py           模型调用(唯一与供应商相关的文件)
 config.py        配置与网络地址探测
 selftest.py      算法自检
 make_icons.py    生成 PWA 图标
+setup-firewall.ps1  Windows:放行手机访问(仅限 Tailscale 网段)
 demo_seed.json   演示数据(虚构人名),兼作测试基准
 web/             前端(单页,无构建)
 ```
