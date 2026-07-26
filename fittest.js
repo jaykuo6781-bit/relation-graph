@@ -207,6 +207,79 @@ check("双击文件打开时,主界面会给出明确提示",
 check("双击文件打开时,对比页会给出明确提示",
       cmp.includes('location.protocol === "file:"'));
 
+console.log("\n人物卡分段");
+{
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+  const segs = [...appjs.matchAll(/data-seg="([a-z]+)" role="tab"/g)].map(m => m[1]);
+  check(`分段按钮有 ${segs.length} 个`, segs.length === 3, segs.join(","));
+  // 按钮的 data-seg 必须都能在内容区找到对应的面板,否则点了是一片空白
+  for (const k of segs) {
+    check(`「${k}」这一段有对应的内容面板`,
+          new RegExp(`<div data-seg="${k}">`).test(appjs));
+    check(`「${k}」这一段在 CSS 里有显示规则`,
+          css.includes(`.seg-body[data-on="${k}"] > [data-seg="${k}"]`));
+  }
+  check("默认展开的那段是存在的",
+        segs.includes((appjs.match(/class="seg-body" data-on="([a-z]+)"/) || [])[1]));
+  check("openSheet 之后会接上分段的事件委托",
+        /openSheet[\s\S]{0,220}bindSegs\(body\)/.test(appjs));
+}
+
+console.log("\n生成的 HTML 片段");
+{
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+  /* 同一个标签上出现两个 class 属性时,浏览器**只认第一个**,后面的静默失效。
+     把内联样式批量换成类名时极容易撞上(元素本来就有 class)。
+     这类错误页面不会报任何错,只是样式没生效,肉眼几乎看不出来。 */
+  const dup = [...appjs.matchAll(/<[a-z]+ [^>]*class="[^"]*"[^>]*class="/g)];
+  check(`没有重复的 class 属性(发现 ${dup.length} 处)`, dup.length === 0,
+        "浏览器只认第一个 class,后面那个等于没写");
+
+  const dupStyle = [...appjs.matchAll(/<[a-z]+ [^>]*style="[^"]*"[^>]*style="/g)];
+  check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
+}
+
+console.log("\n卡片迁到原生 <dialog>");
+{
+  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+
+  check("#sheet 是 <dialog> 而不是 <div>",
+        /<dialog id="sheet"/.test(html), "还是老的浮层实现");
+  check("头部(把手 + 关闭)在滚动容器外面",
+        /<div class="sheet-head">[\s\S]*?<\/div>\s*<!--[\s\S]*?-->\s*<div class="sheet-body"/.test(html)
+        || html.indexOf('class="sheet-head"') < html.indexOf('class="sheet-body"'),
+        "关闭按钮会随内容滚走 —— 人物卡很长,滚两屏就找不到 ✕ 了");
+
+  /* showModal() 对已经打开的 dialog 会抛 InvalidStateError,而
+     "人物卡里点一条关系 → 打开连线卡" 正是在已开状态下调的。
+     少了这个判断,点关系行会直接报错。 */
+  check("showModal 前判断了 dlg.open(否则重入会抛 InvalidStateError)",
+        /if\s*\(!dlg\.open\)\s*\{[\s\S]{0,220}?showModal\(\)/.test(appjs));
+
+  check("关闭走动画后再 close(退场不再是瞬间消失)",
+        /classList\.add\("closing"\)[\s\S]{0,160}animationend/.test(appjs));
+  check("close 事件里统一做清理(所有关闭路径汇到一处)",
+        /addEventListener\("close"/.test(appjs));
+  check("点遮罩能关闭(e.target === dlg 时命中的就是 ::backdrop)",
+        /e\.target === dlg/.test(appjs));
+  check("把手真的绑了下拉手势(以前画了个把手却什么都不做)",
+        /sheet-head[\s\S]{0,600}touchmove/.test(appjs));
+  check("boot 里调用了 bindSheet", /bindSheet\(\);/.test(appjs));
+
+  check("::backdrop 有压暗(深色下卡片和背景分层全靠它)",
+        /\.sheet::backdrop\{[^}]*background/.test(css));
+  check("深色下有顶缘高光线,浅色下关掉",
+        /\.sheet::before\{/.test(css) &&
+        /\[data-theme="light"\] \.sheet::before\{display:none\}/.test(css));
+  check("滚动容器有 overscroll-behavior:contain(否则滚到底会带动整页)",
+        /\.sheet-body\{[^}]*overscroll-behavior:contain/.test(css));
+
+  check("正文里不再自带把手和关闭按钮(已经在静态结构里了)",
+        !/sheet-grab/.test(appjs) && !appjs.includes('class="close"'),
+        "会出现两个 ✕");
+}
+
 console.log("\n图标雪碧图");
 /* <use href="#i-x"> 引到一个不存在的 symbol 时,SVG 什么都不画,也不报错 ——
    按钮会变成一块空白,而且只有肉眼才看得出来。所以这里静态核对一遍。 */

@@ -150,9 +150,25 @@
   </section>
 
   <!-- 弹出卡片(人物 / 连线 / AI 审核 共用) -->
-  <div id="sheet" class="sheet hidden"></div>
-
 </main>
+
+<!-- 用原生 <dialog> + showModal() 而不是自己写浮层:
+     焦点陷阱、Esc 关闭、背景 inert、top layer —— 这四样全是浏览器给的,
+     手写要 60 多行而且容易漏。iOS Safari 15.4(2022-03)起支持 ::backdrop。
+
+     ::backdrop 那层压暗是最要紧的收益:深色 UI 里黑底上的黑阴影几乎不可见,
+     以前卡片和背后的图糊在一起,层次全靠 1px 边框撑着。 -->
+<dialog id="sheet" class="sheet">
+  <div class="sheet-head">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <button class="close" id="sheetClose" aria-label="关闭">
+      <svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+  </div>
+  <!-- autofocus 落在滚动容器上:dialog 打开时会自动聚焦第一个可聚焦元素,
+       而 AI 审核卡片里第一个是复选框 —— 那会把内容直接滚过去。 -->
+  <div class="sheet-body" id="sheetBody" tabindex="-1" autofocus></div>
+</dialog>
 
 <nav id="tabbar" role="tablist">
   <button class="navbtn on" data-view="graph" aria-current="page">

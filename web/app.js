@@ -261,6 +261,7 @@ async function boot() {
 
   bindAiBar();
   watchAiBar();
+  bindSheet();
   await refresh();          // 圈子在这里面就定好了,人也是按圈子取的
   paintCircleBtn();
   await loadGraph();
@@ -413,18 +414,99 @@ function paintLegend() {
                  : `<span class="k">节点亮度 = 重要程度</span>`);
 }
 
+/* ---------------- 卡片:统一的开关 ----------------
+   所有关闭路径(✕ / Esc / 点遮罩 / 下拉 / onBlank)最终都汇到 dialog 的
+   close 事件,清理逻辑因此只写一份。 */
+
+let sheetClosing = false;
+
+function openSheet(html, label) {
+  const dlg = $("#sheet");
+  const body = $("#sheetBody");
+  body.innerHTML = html;
+  bindSegs(body);
+  if (label) dlg.setAttribute("aria-label", label);
+  if (!dlg.open) {
+    // showModal() 对已经打开的 dialog 会抛 InvalidStateError,
+    // 而"人物卡里点一条关系 → 打开连线卡"正是在已开状态下调的
+    sheetClosing = false;
+    dlg.classList.remove("closing");
+    dlg.style.transform = "";
+    dlg.showModal();
+  }
+}
+
+/* 卡片里的分段切换。翻的是容器上的一个 data 属性,逐段的显隐交给 CSS ——
+   不重建 DOM,所以切回来时滚动位置和已展开的内容都还在。 */
+function bindSegs(root) {
+  const bar = root.querySelector(".seg");
+  if (!bar) return;
+  const body = root.querySelector(".seg-body");
+  bar.addEventListener("click", e => {
+    const b = e.target.closest(".seg-btn");
+    if (!b) return;
+    bar.querySelectorAll(".seg-btn").forEach(x => {
+      const on = x === b;
+      x.classList.toggle("on", on);
+      x.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    body.dataset.on = b.dataset.seg;
+  });
+}
+
 function closeSheets() {
-  document.querySelectorAll(".sheet").forEach(s => s.classList.add("hidden"));
-  GraphView.focus(null);
+  const dlg = $("#sheet");
+  if (!dlg || !dlg.open || sheetClosing) return;
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return dlg.close();
+  sheetClosing = true;
+  dlg.classList.add("closing");
+  dlg.addEventListener("animationend", () => dlg.close(), { once: true });
+}
+
+function bindSheet() {
+  const dlg = $("#sheet");
+
+  dlg.addEventListener("close", () => {
+    sheetClosing = false;
+    dlg.classList.remove("closing", "dragging");
+    dlg.style.transform = "";
+    $("#sheetBody").innerHTML = "";
+    GraphView.focus(null);
+  });
+
+  // 点遮罩关闭:点 ::backdrop 时 event.target 就是 dialog 本身
+  // (前提是 dialog 自己 padding:0,否则内边距区域也会命中它)
+  dlg.addEventListener("click", e => { if (e.target === dlg) closeSheets(); });
+  $("#sheetClose").onclick = () => closeSheets();
+
+  /* 把手以前画了个可拖的样子却什么都不做 —— 比没有更糟。真绑上。
+     只写 transform,走合成层。 */
+  const head = dlg.querySelector(".sheet-head");
+  let y0 = 0, dy = 0, on = false;
+  head.addEventListener("touchstart", e => {
+    if (e.touches.length !== 1) return;
+    on = true; dy = 0; y0 = e.touches[0].clientY;
+    dlg.classList.add("dragging");
+  }, { passive: true });
+  head.addEventListener("touchmove", e => {
+    if (!on) return;
+    dy = Math.max(0, e.touches[0].clientY - y0);   // 只能往下拉
+    dlg.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  head.addEventListener("touchend", () => {
+    if (!on) return;
+    on = false;
+    dlg.classList.remove("dragging");
+    if (dy > 90) return closeSheets();
+    dlg.style.transform = "";                      // 没拉够,弹回去
+  });
 }
 
 /* ---------------- 人物卡片(四个分析折叠在这里) ---------------- */
 
 async function showPerson(pid) {
   GraphView.focus(pid);
-  const sheet = $("#sheet");
-  sheet.innerHTML = '<div class="sheet-grab"></div><div class="dimtext">载入中…</div>';
-  sheet.classList.remove("hidden");
+  openSheet('<div class="dimtext">载入中…</div>');
 
   let d, b;
   try {
@@ -432,7 +514,7 @@ async function showPerson(pid) {
       api(`/api/person?id=${pid}&` + cq()),
       api(`/api/analysis/brief?id=${pid}&` + cq()),
     ]);
-  } catch (e) { sheet.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; return; }
+  } catch (e) { openSheet(`<div class="warnbox">${esc(e.message)}</div>`); return; }
 
   const p = d.person;
 
@@ -488,9 +570,7 @@ async function showPerson(pid) {
       <div class="hint blurable">${esc(t.hint)}</div>
     </div>`).join("") || '<div class="dimtext">他周围没有不稳定的三角</div>';
 
-  sheet.innerHTML = `
-    <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
+  openSheet(`
     <div class="head">
       ${avatar(pid, p.name)}
       <div class="grow">
@@ -501,43 +581,56 @@ async function showPerson(pid) {
     <div style="margin-bottom:10px">${d.circles.map(c =>
       `<span class="tag">${esc(c.icon || "")} ${esc(c.name)}</span>`).join("")}</div>
 
-    <div class="sec">关系(${d.relations.length})</div>
-    <div class="list">${rels}</div>
+    <!-- 分成三段。以前这些全叠在一个面板里,人物卡片长到两千多像素,
+         想看事件要一路滚过关系、拉拢名单、引荐路径、派系、三角。
+         切换只翻 .seg-body 上的一个 data 属性,显隐交给 CSS。 -->
+    <div class="seg" role="tablist">
+      <button class="seg-btn on" data-seg="rel" role="tab">关系 ${d.relations.length}</button>
+      <button class="seg-btn" data-seg="ana" role="tab">分析</button>
+      <button class="seg-btn" data-seg="evt" role="tab">事件 ${d.events.length}</button>
+    </div>
 
-    <div class="sec">可以拉拢谁对付他</div>
-    <div class="list">${alliesHtml}</div>
+    <div class="seg-body" data-on="rel">
+      <div data-seg="rel">
+        <div class="list">${rels}</div>
+      </div>
 
-    <div class="sec">我该托谁引荐</div>${intro}
+      <div data-seg="ana">
+        <div class="sec">可以拉拢谁对付他</div>
+        <div class="list">${alliesHtml}</div>
 
-    ${fac ? '<div class="sec">他所在的派系</div>' + fac : ""}
+        <div class="sec">我该托谁引荐</div>${intro}
 
-    <div class="sec">他周围的不稳定三角</div>${tris}
+        ${fac ? '<div class="sec">他所在的派系</div>' + fac : ""}
 
-    <div class="sec">相关事件(${d.events.length})</div>
-    ${d.events.slice(0, 6).map(e => `<div class="card">
-        <div class="blurable">${esc(e.text)}</div>
-        <div class="hint">${new Date(e.happened_at * 1000).toLocaleDateString("zh-CN")}
-          ${e.source ? " · " + esc(e.source) : ""}</div></div>`).join("")
-      || '<div class="dimtext">还没有相关事件</div>'}
+        <div class="sec">他周围的不稳定三角</div>${tris}
+      </div>
+
+      <div data-seg="evt">
+        ${d.events.slice(0, 20).map(e => `<div class="card">
+            <div class="blurable">${esc(e.text)}</div>
+            <div class="hint">${new Date(e.happened_at * 1000).toLocaleDateString("zh-CN")}
+              ${e.source ? " · " + esc(e.source) : ""}</div></div>`).join("")
+          || '<div class="dimtext empty-line">还没有相关事件</div>'}
+      </div>
+    </div>
 
     <div class="btn-row">
       <button class="btn" onclick="markMe(${pid})">设为「我」</button>
       <button class="btn danger" onclick="delPerson(${pid})">删除此人</button>
-    </div>`;
+    </div>`);
 }
 
 /* ---------------- 连线卡片:两个人之间的故事 ---------------- */
 
 async function showPair(a, b) {
   GraphView.focusEdge(a, b);
-  const sheet = $("#sheet");
-  sheet.innerHTML = '<div class="sheet-grab"></div><div class="dimtext">载入中…</div>';
-  sheet.classList.remove("hidden");
+  openSheet('<div class="dimtext">载入中…</div>');
 
   let d;
   try {
     d = await api(`/api/pair?a=${a}&b=${b}&` + cq());
-  } catch (e) { sheet.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`; return; }
+  } catch (e) { openSheet(`<div class="warnbox">${esc(e.message)}</div>`); return; }
 
   const rels = d.relations.map(r => {
     const dir = r.directed
@@ -547,7 +640,7 @@ async function showPair(a, b) {
         <span class="glyph">${esc(r.glyph || "")}</span>
         <b>${esc(r.kind)}</b>${strengthTag(r.strength)}
         <span class="spacer"></span>
-        <button class="btn" class="btn mini"
+        <button class="btn mini"
           onclick="delRelation(${r.id},${a},${b})">删</button>
       </div>
       ${dir}
@@ -562,9 +655,7 @@ async function showPair(a, b) {
         ${s.source ? " · " + esc(s.source) : ""}</div>
     </div>`).join("") || '<div class="dimtext">还没有记录他们之间的故事</div>';
 
-  sheet.innerHTML = `
-    <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
+  openSheet(`
     <div class="head">
       ${avatar(a, d.a.name, "md")}
       <span class="dimtext glyph">—</span>
@@ -583,7 +674,7 @@ async function showPair(a, b) {
       placeholder="例:去年年会上两人当众吵了一架,之后再没同框过。"></textarea>
     <div class="btn-row">
       <button class="btn primary" onclick="addPairStory(${a},${b})">保存这段故事</button>
-    </div>`;
+    </div>`);
 }
 
 async function addPairStory(a, b) {
@@ -684,10 +775,7 @@ async function sendIngest() {
 }
 
 function showIngestUnconfigured() {
-  const sheet = $("#sheet");
-  sheet.innerHTML = `
-    <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
+  openSheet(`
     <h3>AI 录入还没启用</h3>
     <div class="warnbox">
       需要先配置模型的 API Key。在电脑上设置环境变量
@@ -695,8 +783,7 @@ function showIngestUnconfigured() {
     </div>
     <div class="hint">启用后可以:粘一段话、或直接丢一张聊天截图进来,
       AI 会把里面的人物和关系抽成候选清单,<b>每条都附上原文摘录</b>,
-      你逐条确认后才入库。其余功能不受影响,现在就能用。</div>`;
-  sheet.classList.remove("hidden");
+      你逐条确认后才入库。其余功能不受影响,现在就能用。</div>`);
 }
 
 function showReview(d) {
@@ -714,11 +801,11 @@ function showReview(d) {
     // 默认选「合并」,但整行不预先勾选 —— 强迫看一眼再决定。
     const choice = fuzzy ? `
       <div class="hstack wrap" style="margin-top:6px">
-        <label class="hstack" class="hstack tight">
+        <label class="hstack tight">
           <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
                  value="merge" checked>
           <span>合并进「${esc(p.matched_name)}」</span></label>
-        <label class="hstack" class="hstack tight">
+        <label class="hstack tight">
           <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
                  value="create">
           <span>是另一个人,新建</span></label>
@@ -763,10 +850,7 @@ function showReview(d) {
       </div>
     </div>`).join("");
 
-  const sheet = $("#sheet");
-  sheet.innerHTML = `
-    <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
+  openSheet(`
     <h3>AI 读出来这些</h3>
     <div class="sub">用的是 ${esc(d.model)}。<b>每条都附了原文摘录</b>,
       扫一眼就知道它有没有编。确认无误的才会入库到「${esc(S.circle.name)}」。</div>
@@ -780,8 +864,7 @@ function showReview(d) {
     <div class="btn-row">
       <button class="btn primary" id="reviewOk">确认入库</button>
       <button class="btn" onclick="closeSheets()">放弃</button>
-    </div>`;
-  sheet.classList.remove("hidden");
+    </div>`);
 
   $("#reviewOk").onclick = async () => {
     const persons = people.map((p, i) => {
@@ -854,9 +937,9 @@ function renderSettings() {
           <div class="nm">${esc(c.name)}</div>
           <div class="meta">${esc(c.kind)} · ${c.people} 人 · ${c.relations} 条关系</div>
         </div>
-        <button class="btn" class="btn mini"
+        <button class="btn mini"
           onclick="renameCircle(${c.id})">改名</button>
-        <button class="btn danger" class="btn mini"
+        <button class="btn danger mini"
           onclick="dropCircle(${c.id})">删</button>
       </div>`).join("")}
     <div class="btn-row"><button class="btn" onclick="newCircle()">＋ 新建圈子</button></div>
