@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no,maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="关系图">
+<meta name="theme-color" content="#14161a">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<title>关系图</title>
+</head>
+<body>
+
+<header id="topbar">
+  <div class="title" id="viewTitle">图谱</div>
+  <div class="spacer"></div>
+  <button id="maskBtn" class="icon-btn" title="打码 / 取消打码">🕶</button>
+</header>
+
+<main id="views">
+
+  <!-- ================= 图谱 ================= -->
+  <section class="view" id="view-graph">
+    <div id="stage">
+      <div id="canvas"><svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+      <div id="graphEmpty" class="empty hidden">
+        <p>还没有数据</p>
+        <button class="btn primary" data-goto="input">去录入</button>
+        <button class="btn" id="seedBtn2">载入演示数据</button>
+      </div>
+    </div>
+    <div id="graphBar">
+      <span id="graphStat" class="stat"></span>
+      <div class="spacer"></div>
+      <button class="chip" id="fitBtn">复位</button>
+    </div>
+    <div id="nodeCard" class="sheet hidden"></div>
+  </section>
+
+  <!-- ================= 查人 ================= -->
+  <section class="view hidden" id="view-people">
+    <div class="pad">
+      <input id="peopleSearch" class="input" placeholder="搜索姓名 / 部门 / 职位" autocomplete="off">
+      <div id="peopleList" class="list"></div>
+    </div>
+    <div id="personCard" class="sheet hidden"></div>
+  </section>
+
+  <!-- ================= 谋划 ================= -->
+  <section class="view hidden" id="view-plan">
+    <div class="pad">
+      <div class="tabs" id="planTabs">
+        <button class="tab on" data-plan="brief">针对某人</button>
+        <button class="tab" data-plan="factions">派系</button>
+        <button class="tab" data-plan="key">关键人物</button>
+        <button class="tab" data-plan="tri">不稳定三角</button>
+      </div>
+      <div id="planBody"></div>
+    </div>
+  </section>
+
+  <!-- ================= 录入 ================= -->
+  <section class="view hidden" id="view-input">
+    <div class="pad">
+      <div class="tabs scroll" id="inputTabs">
+        <button class="tab on" data-input="rel">加关系</button>
+        <button class="tab" data-input="event">记事件</button>
+        <button class="tab" data-input="story">故事解析</button>
+        <button class="tab" data-input="roster">导名单</button>
+        <button class="tab" data-input="bulk">批量关系</button>
+      </div>
+      <div id="inputBody"></div>
+    </div>
+  </section>
+
+  <!-- ================= 设置 ================= -->
+  <section class="view hidden" id="view-settings">
+    <div class="pad" id="settingsBody"></div>
+  </section>
+
+</main>
+
+<nav id="tabbar">
+  <button class="navbtn on" data-view="graph"><i>🕸</i><span>图谱</span></button>
+  <button class="navbtn" data-view="people"><i>👤</i><span>查人</span></button>
+  <button class="navbtn" data-view="plan"><i>♟</i><span>谋划</span></button>
+  <button class="navbtn" data-view="input"><i>✎</i><span>录入</span></button>
+  <button class="navbtn" data-view="settings"><i>⚙</i><span>设置</span></button>
+</nav>
+
+<div id="toast" class="hidden"></div>
+
+<script src="/graph.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
