@@ -33,3 +33,7 @@ desktop.ini
 # 运行时产物
 *.log
 *.err
+
+# 提交信息草稿(scp 过来的临时文件,别被 git add -A 顺手带走)
+_msg.txt
+_*.txt
