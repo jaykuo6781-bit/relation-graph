@@ -143,7 +143,19 @@
 }
 
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{height:100%;margin:0;overscroll-behavior:none}
+/* 把整页钉死。index.html 里虽然写了 user-scalable=no,但 **iOS Safari 从
+   iOS 10 起就故意忽略它**(无障碍考虑),拦不住双指缩放和双击缩放 ——
+   真机上出现过整个页面被放大平移、顶栏左边的圈子名和整条底栏被挤出屏幕。
+   图谱自己的缩放在 #canvas 的 transform 上,和页面缩放是两回事。
+
+   position:fixed + inset:0 让页面根本没有可滚动/可平移的区域;
+   touch-action:manipulation 关掉双击缩放(但保留单击和滚动)。 */
+html,body{
+  height:100%;margin:0;overscroll-behavior:none;
+  position:fixed;inset:0;overflow:hidden;
+  touch-action:manipulation;
+  -webkit-text-size-adjust:100%;   /* 横竖屏切换时 Safari 会自作主张放大字号 */
+}
 body{
   background:var(--bg-0);color:var(--text);
   font:var(--fs-body)/var(--lh-normal) -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",
@@ -151,6 +163,13 @@ body{
   display:flex;flex-direction:column;
   -webkit-font-smoothing:antialiased;
 }
+/* 可点的外壳元素统一关掉双击缩放和长按选词 —— 连点两个 tab 或者
+   手指在按钮上停顿一下,都不该触发浏览器行为。 */
+#topbar,#tabbar,#aibar,.sheet-head{
+  touch-action:manipulation;
+  -webkit-touch-callout:none;-webkit-user-select:none;user-select:none;
+}
+
 .hidden{display:none !important}
 /* 属性形式的 hidden 也必须真的隐藏。UA 样式表里的 [hidden]{display:none} 特指度
    是 (0,1,0),而 .row 自己写着 display:flex —— 后者赢,元素照样显示。

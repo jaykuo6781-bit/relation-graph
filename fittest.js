@@ -262,6 +262,23 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
+console.log("\n整页不能被浏览器缩放/平移");
+{
+  /* iOS Safari 从 iOS 10 起故意忽略 user-scalable=no,所以只能靠 CSS 锁。
+     真机上出现过整页被放大平移、顶栏的圈子名和整条底栏被挤出屏幕。 */
+  const c = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  check("html,body 被固定,没有可平移的区域",
+        /html,body\{[^}]*position:fixed/.test(c) && /html,body\{[^}]*overflow:hidden/.test(c),
+        "光靠 viewport 的 user-scalable=no 在 iOS 上没用");
+  check("关掉双击缩放(touch-action:manipulation)",
+        /html,body\{[^}]*touch-action:manipulation/.test(c));
+  check("顶栏/底栏/输入栏也关掉双击缩放",
+        /#topbar,#tabbar,#aibar[^{]*\{[^}]*touch-action:manipulation/.test(c));
+  check("#stage 仍然是 touch-action:none(图谱要自己处理捏合)",
+        /#stage\{[^}]*touch-action:none/.test(c),
+        "改成 manipulation 的话图谱的双指缩放会被浏览器抢走");
+}
+
 console.log("\n给 dialog 写了 display 就必须补 :not([open])");
 {
   /* <dialog> 关闭时靠默认样式表的 dialog:not([open]){display:none} 隐藏,
