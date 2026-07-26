@@ -490,9 +490,19 @@ button{font-family:inherit;color:inherit}
 .sheet{
   position:fixed;inset:0;margin:0;padding:0;border:0;
   width:100%;max-width:none;height:100svh;max-height:100svh;
-  background:transparent;box-shadow:none;overflow:hidden;
+  background:transparent;box-shadow:none;
+  /* 不能 overflow:hidden —— 卡片开着时 #toast 会被搬进来,裁掉就等于
+     回到「看不见」的老问题 */
   display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
 }
+/* ⚠ 这一条不能少。<dialog> 关闭时是靠浏览器默认样式表里的
+   `dialog:not([open]){display:none}` 隐藏的,而上面那句 display:flex
+   是类选择器 —— 优先级高于默认样式表,会把它盖掉。后果:一个
+   position:fixed;inset:0 的透明层永远铺在整个页面上,吞掉所有点击、
+   拖动和滚动,而且看不出来。
+   凡是给 dialog 写了 display 的地方,都必须补这一条(#toast 同理)。 */
+.sheet:not([open]){display:none}
+
 @supports not (height: 100svh){        /* iOS 15.4 没有 svh,退回 -webkit-fill-available */
   .sheet{height:-webkit-fill-available;max-height:-webkit-fill-available}
 }
@@ -802,17 +812,14 @@ body.masked #svg .node .nm{stroke:var(--text)}
 body.masked #svg .node .ini{stroke:var(--node-ink)}
 body.masked #svg .elabel{stroke:var(--text)}
 
-/* UA 默认给 dialog 的 margin/border/padding 要清掉。
-   不设 ::backdrop —— 非模态 dialog 本来就没有。 */
 #toast{
   position:fixed;left:50%;bottom:calc(104px + var(--safe-b));right:auto;top:auto;
-  transform:translateX(-50%);margin:0;border:0;
+  transform:translateX(-50%);z-index:100;
   background:var(--text);color:var(--bg-0);font-weight:var(--fw-med);
   padding:9px 17px;border-radius:var(--r-md);font-size:var(--fs-small);
   box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:86vw;width:max-content;
   text-align:center;
 }
-#toast:not([open]){display:none}
 #toast b{text-decoration:underline;text-underline-offset:2px}
 #busy{
   position:fixed;inset:0;z-index:90;display:flex;

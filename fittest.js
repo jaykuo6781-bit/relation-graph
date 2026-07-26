@@ -262,6 +262,24 @@ console.log("\n生成的 HTML 片段");
   check(`没有重复的 style 属性(发现 ${dupStyle.length} 处)`, dupStyle.length === 0);
 }
 
+console.log("\n给 dialog 写了 display 就必须补 :not([open])");
+{
+  /* <dialog> 关闭时靠默认样式表的 dialog:not([open]){display:none} 隐藏,
+     而任何类/id 选择器写的 display 都会盖掉它 —— 于是一个 position:fixed
+     的透明层永远铺在页面上,吞掉所有点击、拖动和滚动,页面看起来完全正常。
+     这个坑我踩过一次,真机上表现为"什么都点不动"。 */
+  const dialogIds = ["sheet", "toast"];
+  for (const id of dialogIds) {
+    const sel = id === "sheet" ? "\\.sheet" : "#" + id;
+    const setsDisplay = new RegExp(sel + "\\{[^}]*display:", "").test(css);
+    if (!setsDisplay) { check(`${id}: 没给 dialog 写 display,无需补规则`, true); continue; }
+    check(`${id}: 写了 display,也补了 :not([open]){display:none}`,
+          new RegExp(sel + "(:not\\(\\[open\\]\\))\\{display:none\\}").test(css)
+          || new RegExp(sel.replace("\\.", "\\.") + ":not\\(\\[open\\]\\)\\{display:none\\}").test(css),
+          "关闭状态下它会铺满视口吞掉所有交互");
+  }
+}
+
 console.log("\n卡片在 iOS 上不能被工具栏吃掉");
 {
   const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
@@ -293,11 +311,23 @@ console.log("\n交叉复核抓到的四处接缝(修完要守住)");
   /* P1 卡片用 showModal() 之后在 top layer,普通元素的 z-index 再高也盖不住。
      19 处 toast 是在卡片开着时触发的,其中包括替代 confirm() 的那个「撤销」——
      看不见也点不到,等于删关系没有任何护栏。 */
-  check("#toast 是 <dialog>(否则会被卡片的 top layer 完全盖住)",
-        /<dialog id="toast"/.test(html));
-  check("toast 用非模态 show() 而不是切 class",
-        /function showToast[\s\S]{0,220}\.show\(\)/.test(appjs));
-  check("hideToast 用 close() 收尾", /function hideToast[\s\S]{0,200}\.close\(\)/.test(appjs));
+  /* 第一版修法是把 #toast 也做成 <dialog> 用 .show() —— **不成立**:
+     非模态的 show() 并不进 top layer(只有 showModal() 才进),而且模态卡片
+     会把外面一切设为 inert,看得见也点不动。真机上验证过,撤销依旧不可见。
+     可行的做法是显示前把它搬进那个打开着的 dialog。 */
+  check("toast 显示前会按卡片是否打开决定挂在哪",
+        /function showToast[\s\S]{0,300}dlg\.open\) \? dlg : document\.body[\s\S]{0,120}appendChild/.test(appjs),
+        "留在 body 里的话,卡片开着时它既被盖住也点不动");
+  check("卡片关闭时把 toast 搬回 body(否则它会跟着 dialog 一起消失)",
+        /parentNode === dlg\) document\.body\.appendChild/.test(appjs));
+  // 先剥掉注释 —— 上面那段说明里就写着 "overflow:hidden" 这几个字,
+  // 直接对着原文匹配会把注释当成声明(我第一次就是这么写错的)
+  const cssNoComment = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  check("卡片容器没有 overflow:hidden(会裁掉搬进来的 toast)",
+        !/\.sheet\{[^}]*overflow:hidden/.test(cssNoComment));
+  check("#toast 是普通元素,不是 dialog",
+        /<div id="toast"/.test(html),
+        "做成 dialog 反而更糟:show() 不进 top layer");
 
   /* P2 父元素的 color:transparent 只靠继承传给后代,而任何自有声明都赢过
      继承值 —— .tag.warn 自己写了 color,打码后色带上照样印着真名。 */

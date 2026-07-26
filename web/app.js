@@ -98,8 +98,15 @@ let undoAction = null;          // 「撤销」toast 上挂着的那个动作
 
 /* 非模态 show():同样进 top layer(所以能盖住 showModal 的卡片),
    但不抢焦点、不加遮罩、不拦背后的点击。重复 show() 会抛,先判 open。 */
+/* 卡片开着时把 toast 搬进那个 dialog 里再显示。
+   模态 dialog 在 top layer,外面的一切被设为 inert —— 留在 body 里的 toast
+   既被盖住也点不动,而「撤销」是必须能点的。
+   (非模态的 dialog.show() 不进 top layer,那条路走不通。) */
 function showToast(t) {
-  if (!t.open) { try { t.show(); } catch (e) { t.setAttribute("open", ""); } }
+  const dlg = document.getElementById("sheet");
+  const host = (dlg && dlg.open) ? dlg : document.body;
+  if (t.parentNode !== host) host.appendChild(t);
+  t.classList.remove("hidden");
 }
 
 function toast(msg) {
@@ -128,8 +135,7 @@ function toastUndo(msg, undo) {
 
 function hideToast() {
   undoAction = null;
-  const t = $("#toast");
-  if (t.open) t.close(); else t.removeAttribute("open");
+  $("#toast").classList.add("hidden");
 }
 
 /* 把一个 async 事件处理器包起来,失败时给出人话提示。
@@ -548,6 +554,9 @@ function bindSheet() {
     dlg.classList.remove("closing", "dragging");
     const c = dlg.querySelector(".sheet-card");
     if (c) c.style.transform = "";
+    // toast 可能被搬进了这个 dialog,卡片一关它会跟着消失 —— 搬回去
+    const tst = document.getElementById("toast");
+    if (tst && tst.parentNode === dlg) document.body.appendChild(tst);
     $("#sheetBody").innerHTML = "";
     GraphView.focus(null);
   });

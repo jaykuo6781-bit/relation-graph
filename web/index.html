@@ -218,11 +218,15 @@
     <svg class="ic lg" aria-hidden="true"><use href="#i-gear"/></svg><span>设置</span></button>
 </nav>
 
-<!-- 必须是 <dialog>:卡片用 showModal() 之后在 top layer,普通元素的
-     z-index 再高也盖不住它 —— 而 19 处 toast 是在卡片开着时触发的,
-     其中包括替代 confirm() 的那个「撤销」。非模态的 .show() 同样进
-     top layer,但不抢焦点、不加遮罩、不拦背后的点击。 -->
-<dialog id="toast" aria-live="polite"></dialog>
+<!-- 卡片用 showModal() 之后在 top layer,普通元素的 z-index 再高也盖不住,
+     而 19 处 toast 是在卡片开着时触发的(含替代 confirm() 的那个「撤销」)。
+
+     试过把它也做成 <dialog> 用 .show() —— 不行:**非模态的 show() 并不进
+     top layer**,只有 showModal() 才进;而且模态卡片会把外面一切设为 inert,
+     看得见也点不动。
+     可行的办法是把它**搬进**打开着的那个 dialog 里(见 app.js 的 showToast):
+     模态 dialog 内部的元素既显示也可交互。 -->
+<div id="toast" class="hidden" role="status" aria-live="polite"></div>
 <div id="busy" class="hidden"><div class="box"></div></div>
 
 <script src="/graph.js"></script>
