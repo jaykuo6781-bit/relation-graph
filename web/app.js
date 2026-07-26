@@ -139,10 +139,11 @@ function strengthTag(w) {
   return `<span class="tag ${cls}">${w > 0 ? "+" : ""}${w} ${STRENGTH_LABEL[w] || ""}</span>`;
 }
 
-function avatar(id, name, size) {
-  const s = size || 44;
-  return `<div class="avatar blurable" style="background:${GraphView.nodeColor(id)};
-    width:${s}px;height:${s}px;font-size:${Math.round(s * 0.4)}px">${esc((name || "?")[0])}</div>`;
+/* 尺寸走 class(默认 / .sm / .md),只有背景色是运行时算的 ——
+   那是数据驱动的,必须内联。 */
+function avatar(id, name, cls) {
+  return `<div class="avatar blurable${cls ? " " + cls : ""}" ` +
+    `style="background:${GraphView.nodeColor(id)}">${esc((name || "?")[0])}</div>`;
 }
 
 /* ---------------- 主题 ---------------- */
@@ -154,7 +155,13 @@ function applyTheme(t) {
   // 必须和 --bg-0 一致,否则 iOS 状态栏和顶栏之间会有一条可见的色差缝
   if (meta) meta.setAttribute("content", t === "light" ? "#f4f6f8" : "#080c18");
   const b = $("#themeBtn");
-  if (b) b.textContent = t === "light" ? "☾" : "☀";
+  if (b) {
+    // 图标表示"点了会变成什么",所以浅色时显示月亮。
+    // 只改一个 href,不重建 DOM。
+    const u = b.querySelector("use");
+    if (u) u.setAttribute("href", t === "light" ? "#i-moon" : "#i-sun");
+    b.setAttribute("aria-label", t === "light" ? "切换到深色主题" : "切换到浅色主题");
+  }
 }
 
 function initTheme() {
@@ -171,8 +178,11 @@ function toggleTheme() {
 /* ---------------- 启动 ---------------- */
 
 async function boot() {
-  // 双击 index.html 打开时地址是 file:///…,浏览器不让页面读数据,
-  // 样式和脚本也加载不到。与其让人对着一堆报错发愣,不如直接说清楚。
+  /* 双击 index.html 打开时地址是 file:///…,浏览器不让页面读数据,
+     样式和脚本也加载不到。与其让人对着一堆报错发愣,不如直接说清楚。
+
+     ⚠ 下面这段的内联样式是**有意的,不要清理**:它的前提就是
+     style.css 没能加载成功,所以不能依赖任何类名。 */
   if (location.protocol === "file:") {
     const url = "http://127.0.0.1:8787/";
     document.body.innerHTML =
@@ -209,14 +219,18 @@ async function boot() {
     b.onclick = () => switchView(b.dataset.view);
   });
 
+  const paintMask = on => {
+    $("#maskBtn").classList.toggle("on", on);
+    $("#maskBtn").setAttribute("aria-pressed", on ? "true" : "false");
+  };
   $("#maskBtn").onclick = () => {
     const on = document.body.classList.toggle("masked");
-    $("#maskBtn").classList.toggle("on", on);
+    paintMask(on);
     localStorage.setItem("masked", on ? "1" : "");
   };
   if (localStorage.getItem("masked")) {
     document.body.classList.add("masked");
-    $("#maskBtn").classList.add("on");
+    paintMask(true);
   }
 
   $("#circleBtn").onclick = toggleCircleMenu;
@@ -233,16 +247,8 @@ async function boot() {
     if (restored) toast("已放回原来的位置");
   };
   $("#themeBtn").onclick = toggleTheme;
-  $("#facBtn").onclick = () => {
-    S.byFaction = !S.byFaction;
-    localStorage.setItem("byFaction", S.byFaction ? "1" : "");
-    GraphView.setFactionMode(S.byFaction);
-    $("#facBtn").classList.toggle("on", S.byFaction);
-    paintLegend();
-    toast(S.byFaction ? "按派系着色" : "回到灰阶");
-  };
+  // 派系着色的开关已挪到设置页(见 renderSettings 的「外观」卡片)
   S.byFaction = !!localStorage.getItem("byFaction");
-  $("#facBtn").classList.toggle("on", S.byFaction);
 
   // 窗口尺寸变了可能跨到另一个画布档位,重新取一次
   let rz;
@@ -279,8 +285,12 @@ function switchView(name) {
   closeSheets();
   document.querySelectorAll(".view").forEach(v => v.classList.add("hidden"));
   $("#view-" + name).classList.remove("hidden");
-  document.querySelectorAll(".navbtn").forEach(b =>
-    b.classList.toggle("on", b.dataset.view === name));
+  document.querySelectorAll(".navbtn").forEach(b => {
+    const on = b.dataset.view === name;
+    b.classList.toggle("on", on);
+    if (on) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
   $("#aibar").classList.toggle("hidden", name !== "graph");
   $("#fitBtn").classList.toggle("hidden", name !== "graph");
   measureAiBar();          // 显隐变了,图例的落点要跟着变
@@ -297,7 +307,7 @@ function paintCircleBtn() {
   $("#circleBtn").innerHTML =
     `<span class="ico">${esc(c ? c.icon || "🌐" : "🌐")}</span>` +
     `<span class="nm">${esc(c ? c.name : "全部")}</span>` +
-    `<span class="caret">▾</span>`;
+    `<svg class="ic sm caret" aria-hidden="true"><use href="#i-caret"/></svg>`;
 }
 
 function setCircleMenuOpen(open) {
@@ -319,9 +329,11 @@ function toggleCircleMenu(e) {
         <span class="sub">${c.people} 人 · ${c.relations} 条</span>
       </button>`).join("") +
     `<div class="cmenu-sep"></div>
-     <button class="cmenu-item" data-act="new"><span class="ico">＋</span>
+     <button class="cmenu-item" data-act="new">
+       <svg class="ic sm ico" aria-hidden="true"><use href="#i-plus"/></svg>
        <span>新建圈子</span></button>
-     <button class="cmenu-item" data-act="manage"><span class="ico">⚙</span>
+     <button class="cmenu-item" data-act="manage">
+       <svg class="ic sm ico" aria-hidden="true"><use href="#i-gear"/></svg>
        <span>管理圈子</span></button>`;
 
   m.querySelectorAll("[data-cid]").forEach(b => {
@@ -430,7 +442,7 @@ async function showPerson(pid) {
     const dir = r.directed
       ? (r.a_id === pid ? " →" : " ←") : "";
     return `<div class="row" onclick="showPair(${pid},${otherId})">
-      ${avatar(otherId, other, 30)}
+      ${avatar(otherId, other, "sm")}
       <div class="main">
         <div class="nm blurable">${esc(other)}</div>
         <div class="meta">${esc(r.glyph || "")} ${esc(r.kind)}${dir}${
@@ -442,7 +454,7 @@ async function showPerson(pid) {
   const allies = (b.allies && b.allies.candidates || []).slice(0, 6);
   const alliesHtml = allies.length ? allies.map((c, i) => `
     <div class="row">
-      <div class="num dimtext" style="width:18px">${i + 1}</div>
+      <div class="num dimtext rank">${i + 1}</div>
       <div class="main">
         <div class="nm blurable">${esc(c.name)}</div>
         <div class="meta">矛盾:${c.conflict_kinds.map(esc).join("、")}(烈度 ${c.conflict})</div>
@@ -453,7 +465,7 @@ async function showPerson(pid) {
 
   // ---- 引荐路径 ----
   const intro = b.intro && b.intro.path
-    ? `<div class="card"><div class="blurable" style="font-size:15px">
+    ? `<div class="card"><div class="blurable">
          ${b.intro.path.map(s => esc(s.name)).join(" → ")}</div>
        <div class="hint">${b.intro.hops} 跳,优先走交情最铁的链路</div></div>`
     : `<div class="card"><div class="dimtext">${
@@ -478,12 +490,12 @@ async function showPerson(pid) {
 
   sheet.innerHTML = `
     <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()">✕</button>
+    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
     <div class="head">
       ${avatar(pid, p.name)}
-      <div style="flex:1;min-width:0">
+      <div class="grow">
         <h3 class="blurable">${esc(p.name)}${p.is_me ? ' <span class="tag">我</span>' : ""}</h3>
-        <div class="sub" style="margin:0">${esc(p.dept || "")} ${esc(p.title || "")}</div>
+        <div class="sub">${esc(p.dept || "")} ${esc(p.title || "")}</div>
       </div>
     </div>
     <div style="margin-bottom:10px">${d.circles.map(c =>
@@ -531,11 +543,11 @@ async function showPair(a, b) {
     const dir = r.directed
       ? `<div class="meta">方向:${esc(r.a_name)} → ${esc(r.b_name)}</div>` : "";
     return `<div class="card">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:17px">${esc(r.glyph || "")}</span>
+      <div class="hstack">
+        <span class="glyph">${esc(r.glyph || "")}</span>
         <b>${esc(r.kind)}</b>${strengthTag(r.strength)}
         <span class="spacer"></span>
-        <button class="btn" style="padding:5px 10px;font-size:13px"
+        <button class="btn" class="btn mini"
           onclick="delRelation(${r.id},${a},${b})">删</button>
       </div>
       ${dir}
@@ -552,13 +564,13 @@ async function showPair(a, b) {
 
   sheet.innerHTML = `
     <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()">✕</button>
+    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
     <div class="head">
-      ${avatar(a, d.a.name, 38)}
-      <span class="dimtext" style="font-size:18px">—</span>
-      ${avatar(b, d.b.name, 38)}
-      <div style="flex:1;min-width:0">
-        <h3 class="blurable" style="font-size:17px">${esc(d.a.name)} 与 ${esc(d.b.name)}</h3>
+      ${avatar(a, d.a.name, "md")}
+      <span class="dimtext glyph">—</span>
+      ${avatar(b, d.b.name, "md")}
+      <div class="grow">
+        <h3 class="blurable">${esc(d.a.name)} 与 ${esc(d.b.name)}</h3>
       </div>
     </div>
 
@@ -567,7 +579,7 @@ async function showPair(a, b) {
     <div class="sec">故事(${d.stories.length})</div>${stories}
 
     <label>再记一笔</label>
-    <textarea id="pairStory" style="min-height:70px"
+    <textarea id="pairStory" class="compact"
       placeholder="例:去年年会上两人当众吵了一架,之后再没同框过。"></textarea>
     <div class="btn-row">
       <button class="btn primary" onclick="addPairStory(${a},${b})">保存这段故事</button>
@@ -675,7 +687,7 @@ function showIngestUnconfigured() {
   const sheet = $("#sheet");
   sheet.innerHTML = `
     <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()">✕</button>
+    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
     <h3>AI 录入还没启用</h3>
     <div class="warnbox">
       需要先配置模型的 API Key。在电脑上设置环境变量
@@ -702,11 +714,11 @@ function showReview(d) {
     // 默认选「合并」,但整行不预先勾选 —— 强迫看一眼再决定。
     const choice = fuzzy ? `
       <div class="hstack wrap" style="margin-top:6px">
-        <label class="hstack" style="gap:5px">
+        <label class="hstack" class="hstack tight">
           <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
                  value="merge" checked>
           <span>合并进「${esc(p.matched_name)}」</span></label>
-        <label class="hstack" style="gap:5px">
+        <label class="hstack" class="hstack tight">
           <input type="radio" name="pm${i}" class="pmerge" data-i="${i}"
                  value="create">
           <span>是另一个人,新建</span></label>
@@ -728,16 +740,16 @@ function showReview(d) {
 
   const rRows = d.relations.map((r, i) => `
     <div class="card">
-      <div style="display:flex;gap:10px;align-items:flex-start">
+      <div class="hstack top">
         <input type="checkbox" class="rchk" data-i="${i}" checked style="margin-top:3px">
-        <div style="flex:1;min-width:0">
+        <div class="grow">
           <div class="blurable"><b>${esc(r.a_name)}</b>
             <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
-          <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap">
-            <select class="rkind" data-i="${i}" style="flex:1;min-width:110px;padding:7px;font-size:14px">
+          <div class="hstack wrap" style="margin-top:var(--sp-15)">
+            <select class="rkind sel-compact kind" data-i="${i}">
               ${kinds.map(k => `<option ${k === r.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}
             </select>
-            <select class="rstr" data-i="${i}" style="width:132px;padding:7px;font-size:14px">
+            <select class="rstr sel-compact str" data-i="${i}">
               ${[3, 2, 1, 0, -1, -2, -3].map(v =>
                 `<option value="${v}" ${v === r.strength ? "selected" : ""}>${
                   v > 0 ? "+" : ""}${v} ${STRENGTH_LABEL[v]}</option>`).join("")}
@@ -754,7 +766,7 @@ function showReview(d) {
   const sheet = $("#sheet");
   sheet.innerHTML = `
     <div class="sheet-grab"></div>
-    <button class="close" onclick="closeSheets()">✕</button>
+    <button class="close" onclick="closeSheets()" aria-label="关闭"><svg class="ic sm" aria-hidden="true"><use href="#i-close"/></svg></button>
     <h3>AI 读出来这些</h3>
     <div class="sub">用的是 ${esc(d.model)}。<b>每条都附了原文摘录</b>,
       扫一眼就知道它有没有编。确认无误的才会入库到「${esc(S.circle.name)}」。</div>
@@ -814,14 +826,14 @@ function renderPeople() {
   $("#peopleList").innerHTML = list.length
     ? list.map(p => `
       <div class="row" onclick="switchView('graph');setTimeout(()=>{showPerson(${p.id});GraphView.centerOn(${p.id},bottomInset()+240)},60)">
-        ${avatar(p.id, p.name, 34)}
+        ${avatar(p.id, p.name, "sm")}
         <div class="main">
           <div class="nm blurable">${esc(p.name)}${
             p.is_me ? ' <span class="tag">我</span>' : ""}</div>
           <div class="meta">${esc(p.dept || "—")} ${esc(p.title || "")}</div>
         </div><span class="dimtext">›</span>
       </div>`).join("")
-    : `<div class="dimtext" style="padding:24px 0;text-align:center">
+    : `<div class="dimtext empty-line">
          ${S.people.length ? "没有匹配的人" : "这个圈子里还没有人"}</div>`;
 }
 
@@ -837,14 +849,14 @@ function renderSettings() {
     <div class="sec">圈子</div>
     ${st.circles.map(c => `
       <div class="row">
-        <span style="font-size:19px">${esc(c.icon || "🌐")}</span>
+        <span class="glyph">${esc(c.icon || "🌐")}</span>
         <div class="main">
           <div class="nm">${esc(c.name)}</div>
           <div class="meta">${esc(c.kind)} · ${c.people} 人 · ${c.relations} 条关系</div>
         </div>
-        <button class="btn" style="padding:6px 10px;font-size:13px"
+        <button class="btn" class="btn mini"
           onclick="renameCircle(${c.id})">改名</button>
-        <button class="btn danger" style="padding:6px 10px;font-size:13px"
+        <button class="btn danger" class="btn mini"
           onclick="dropCircle(${c.id})">删</button>
       </div>`).join("")}
     <div class="btn-row"><button class="btn" onclick="newCircle()">＋ 新建圈子</button></div>
@@ -858,17 +870,17 @@ function renderSettings() {
 
     <div class="sec">往「${esc(S.circle.name)}」里批量导入</div>
     <div class="card">
-      <label style="margin-top:0">人员名单(每行一人:姓名,部门,职位)</label>
-      <textarea id="rosterText" style="min-height:80px"
+      <label>人员名单(每行一人:姓名,部门,职位)</label>
+      <textarea id="rosterText" class="compact"
         placeholder="张三,技术部,后端工程师&#10;李四,市场部,销售经理"></textarea>
       <div class="btn-row"><button class="btn" id="rosterGo">预览并导入</button></div>
       <div id="rosterOut"></div>
     </div>
     <div class="card">
-      <label style="margin-top:0">关系(每行一条:人名-人名:关系 强度)</label>
-      <textarea id="bulkText" style="min-height:80px"
+      <label>关系(每行一条:人名-人名:关系 强度)</label>
+      <textarea id="bulkText" class="compact"
         placeholder="张三-李四:情敌3&#10;张三 -> 王五 : 提携 2"></textarea>
-      <label style="display:flex;align-items:center;gap:8px">
+      <label class="hstack">
         <input type="checkbox" id="bulkAuto"> 遇到库里没有的人,自动建
       </label>
       <div class="btn-row"><button class="btn" id="bulkGo">预览并导入</button></div>
@@ -881,7 +893,7 @@ function renderSettings() {
 
     <div class="sec">数据</div>
     <div class="card">
-      <div class="hint" style="margin:0">全库共 ${st.counts.people} 人 ·
+      <div class="hint">全库共 ${st.counts.people} 人 ·
         ${st.counts.relations} 条关系 · ${st.counts.events} 条事件</div>
       <div class="btn-row">
         <button class="btn" id="exportBtn">导出备份</button>
@@ -894,21 +906,29 @@ function renderSettings() {
     </div>
 
     <div class="sec">模型</div>
-    <div class="card"><div class="hint" style="margin:0">
+    <div class="card"><div class="hint">
       ${st.llm_configured
         ? `已启用 · <span class="mono">${esc(st.llm_model)}</span>`
         : '未配置。设置环境变量 <span class="mono">OPENAI_API_KEY</span> 后重启服务。'}
     </div></div>
 
     <div class="sec">外观</div>
-    <div class="card"><div class="hint" style="margin:0">
-      默认深色。顶栏的 ☀/☾ 切换深浅,🎨 在「灰阶」和「按派系着色」之间切换。<br>
-      灰阶模式下颜色只出现在两个地方:「我」和<b style="color:var(--neg-ink)">负向关系</b> ——
-      让矛盾成为画面上唯一跳出来的东西。
-    </div></div>
+    <div class="card">
+      <label class="hstack">
+        <input type="checkbox" id="facSw" ${S.byFaction ? "checked" : ""}>
+        <span class="grow">按派系着色</span>
+        <svg class="ic sm dimtext" aria-hidden="true"><use href="#i-palette"/></svg>
+      </label>
+      <div class="hint">
+        关掉时画面是灰阶,颜色只出现在两个地方:「我」和<b
+        style="color:var(--neg-ink)">负向关系</b> —— 让矛盾成为画面上唯一
+        跳出来的东西。打开后用经过色觉障碍校验的分类色板给前三大派系上色。<br>
+        深浅主题在顶栏切换。
+      </div>
+    </div>
 
     <div class="sec">隐私</div>
-    <div class="card"><div class="hint" style="margin:0">
+    <div class="card"><div class="hint">
       · 服务只监听本机和 Tailscale,公网扫不到<br>
       · 数据库只存在这台电脑上,<b>不会自动上传</b><br>
       · 顶栏的 🕶 一键把所有人名打码,防止手机被人瞥见<br>
@@ -923,6 +943,13 @@ function renderSettings() {
       也可以把 <span class="mono">OPENAI_BASE_URL</span> 指向本地模型,
       这样连接口调用都不出这台机器。
     </div></div>`;
+
+  $("#facSw").onchange = e => {
+    S.byFaction = e.target.checked;
+    localStorage.setItem("byFaction", S.byFaction ? "1" : "");
+    GraphView.setFactionMode(S.byFaction);
+    paintLegend();
+  };
 
   $("#meSel").onchange = guard(async e => {
     if (!e.target.value) return;
@@ -941,7 +968,7 @@ function renderSettings() {
     const ups  = d.rows.filter(r => r.status === "update");
     const dup  = d.rows.filter(r => r.status === "skip");
     $("#rosterOut").innerHTML =
-      `<div class="card"><div class="hint" style="margin:0">` +
+      `<div class="card"><div class="hint">` +
       `将<b>新建 ${news.length} 人</b>、<b>更新 ${ups.length} 人</b>` +
       (dup.length ? `,跳过 ${dup.length} 行重复` : "") + `。<br>` +
       (news.length ? `新建:${news.slice(0, 12).map(r => esc(r.name)).join("、")}` +
@@ -1055,6 +1082,8 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }
 
+/* 同样是逃生路径:boot 挂了说明应用没起来,样式表未必可用,
+   所以这里的内联样式也是有意的。 */
 boot().catch(e => {
   document.body.innerHTML =
     `<div style="padding:30px;color:#e66767;font:15px system-ui">

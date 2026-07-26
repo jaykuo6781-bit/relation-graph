@@ -22,18 +22,80 @@
 </head>
 <body>
 
+<!-- ============================================================
+     图标雪碧图。同文档 <symbol> + <use>。
+
+     为什么不拆成独立的 sprite.svg:**iOS Safari 至今不支持跨文档 <use>**,
+     那样就得配 polyfill,等于引入依赖,违反本项目的零构建原则。
+
+     为什么不用 emoji(之前就是):emoji 走的是彩色字体,忽略 CSS 的 color。
+     顶栏原来 ◐ ☀ ⊹ 是文本字形、🕶 是彩色 emoji,四个按钮里三个能被
+     .icon-btn.on 染成强调色、一个不能,选中态表现不一致;而且它们分别
+     来自不同的 fallback 字体,基线和粗细都对不齐。
+     stroke/fill 是**可继承的呈现属性**,能穿过 <use> 的影子树,
+     所以下面这些图标写 stroke="currentColor" 就自动吃 color 了。
+     ============================================================ -->
+<svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"
+     style="position:absolute;width:0;height:0;overflow:hidden">
+  <symbol id="i-sun" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="4"/>
+    <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24">
+    <path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/>
+  </symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24">
+    <path d="M4 9V5.5A1.5 1.5 0 015.5 4H9M15 4h3.5A1.5 1.5 0 0120 5.5V9M20 15v3.5a1.5 1.5 0 01-1.5 1.5H15M9 20H5.5A1.5 1.5 0 014 18.5V15"/>
+    <circle cx="12" cy="12" r="2.5"/>
+  </symbol>
+  <symbol id="i-mask" viewBox="0 0 24 24">
+    <path d="M2.5 12S6 5.5 12 5.5c1.6 0 3 .47 4.2 1.16M21.5 12s-1.3 2.4-3.6 4.2M9.9 9.9a3 3 0 104.2 4.2"/>
+    <path d="M3 3l18 18"/>
+  </symbol>
+  <symbol id="i-graph" viewBox="0 0 24 24">
+    <circle cx="12" cy="5" r="2.4"/><circle cx="5" cy="17" r="2.4"/>
+    <circle cx="19" cy="17" r="2.4"/>
+    <path d="M10.6 7L6.4 14.9M13.4 7l4.2 7.9M7.4 17h9.2"/>
+  </symbol>
+  <symbol id="i-person" viewBox="0 0 24 24">
+    <circle cx="12" cy="8" r="3.6"/>
+    <path d="M4.5 20a7.5 7.5 0 0115 0"/>
+  </symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.9 15a1.7 1.7 0 00.34 1.87l.06.06a1.9 1.9 0 11-2.7 2.7l-.06-.06a1.7 1.7 0 00-2.9 1.2V21a1.9 1.9 0 11-3.8 0v-.1a1.7 1.7 0 00-2.9-1.2l-.06.06a1.9 1.9 0 11-2.7-2.7l.06-.06A1.7 1.7 0 003 15H3a1.9 1.9 0 110-3.8h.1a1.7 1.7 0 001.2-2.9l-.06-.06a1.9 1.9 0 112.7-2.7l.06.06A1.7 1.7 0 0010 4.5V4a1.9 1.9 0 013.8 0v.1a1.7 1.7 0 002.9 1.2l.06-.06a1.9 1.9 0 012.7 2.7l-.06.06a1.7 1.7 0 001.2 2.9H21a1.9 1.9 0 010 3.8h-.1a1.7 1.7 0 00-1.2 1z"/>
+  </symbol>
+  <symbol id="i-caret" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-attach" viewBox="0 0 24 24">
+    <path d="M20 11.5l-8.4 8.4a5 5 0 01-7.1-7.1l9.2-9.2a3.4 3.4 0 014.8 4.8l-9.2 9.2a1.7 1.7 0 01-2.4-2.4l8.5-8.5"/>
+  </symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24">
+    <path d="M12 3a9 9 0 100 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1a1.5 1.5 0 011.11-2.5H16a5 5 0 005-5c0-4.42-4.03-8-9-8z"/>
+    <circle cx="7.5" cy="11.5" r="1" fill="currentColor" stroke="none"/>
+    <circle cx="10.5" cy="7.5" r="1" fill="currentColor" stroke="none"/>
+    <circle cx="15" cy="8" r="1" fill="currentColor" stroke="none"/>
+  </symbol>
+</svg>
+
 <header id="topbar">
   <button id="circleBtn" aria-haspopup="true" aria-expanded="false"
           aria-controls="circleMenu"></button>
   <div class="spacer"></div>
-  <button id="facBtn" class="icon-btn" title="灰阶 / 按派系着色"
-          aria-label="灰阶 / 按派系着色" aria-pressed="false">◐</button>
+  <!-- 顶栏只留三个:复位和打码是**看图过程中**要按的,主题是随光线环境
+       随手改的。派系着色是"设定一次"的偏好,已挪到设置页做成带文字的开关
+       —— 触屏上 title 永远不显示,一排看不懂的符号让人无从下手。 -->
   <button id="themeBtn" class="icon-btn" title="深色 / 浅色"
-          aria-label="切换深色或浅色主题">☀</button>
+          aria-label="切换到浅色主题">
+    <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg></button>
   <button id="fitBtn" class="icon-btn" title="复位"
-          aria-label="把图复位到刚好铺满屏幕">⊹</button>
+          aria-label="把图复位到刚好铺满屏幕">
+    <svg class="ic" aria-hidden="true"><use href="#i-fit"/></svg></button>
   <button id="maskBtn" class="icon-btn" title="打码 / 取消打码"
-          aria-label="给人名打码" aria-pressed="false">🕶</button>
+          aria-label="给人名打码" aria-pressed="false">
+    <svg class="ic" aria-hidden="true"><use href="#i-mask"/></svg></button>
 
   <!-- 必须放在 #topbar **内部**。它 position:absolute;top:100%,而定位参照的是
        最近的已定位祖先 —— #topbar 有 position:relative,body 没有。
@@ -62,8 +124,11 @@
       <div class="ai-row">
         <textarea id="aiInput" rows="1"
           placeholder="说点什么,或丢一张聊天截图…"></textarea>
-        <button class="ai-btn" id="aiAttach" title="上传截图或文档">📎</button>
-        <button class="ai-btn send" id="aiSend" title="交给 AI">↑</button>
+        <button class="ai-btn" id="aiAttach" title="上传截图或文档"
+                aria-label="上传截图或文档">
+          <svg class="ic" aria-hidden="true"><use href="#i-attach"/></svg></button>
+        <button class="ai-btn send" id="aiSend" title="交给 AI" aria-label="交给 AI">
+          <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg></button>
       </div>
       <input type="file" id="aiFile" class="hidden" multiple
              accept="image/*,.txt,.md,.csv,.log,.pdf,.docx">
@@ -89,10 +154,13 @@
 
 </main>
 
-<nav id="tabbar">
-  <button class="navbtn on" data-view="graph"><i>🕸</i><span>图谱</span></button>
-  <button class="navbtn" data-view="people"><i>👤</i><span>人物</span></button>
-  <button class="navbtn" data-view="settings"><i>⚙</i><span>设置</span></button>
+<nav id="tabbar" role="tablist">
+  <button class="navbtn on" data-view="graph" aria-current="page">
+    <svg class="ic lg" aria-hidden="true"><use href="#i-graph"/></svg><span>图谱</span></button>
+  <button class="navbtn" data-view="people">
+    <svg class="ic lg" aria-hidden="true"><use href="#i-person"/></svg><span>人物</span></button>
+  <button class="navbtn" data-view="settings">
+    <svg class="ic lg" aria-hidden="true"><use href="#i-gear"/></svg><span>设置</span></button>
 </nav>
 
 <div id="toast" class="hidden"></div>

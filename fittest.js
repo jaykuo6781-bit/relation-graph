@@ -207,6 +207,45 @@ check("双击文件打开时,主界面会给出明确提示",
 check("双击文件打开时,对比页会给出明确提示",
       cmp.includes('location.protocol === "file:"'));
 
+console.log("\n图标雪碧图");
+/* <use href="#i-x"> 引到一个不存在的 symbol 时,SVG 什么都不画,也不报错 ——
+   按钮会变成一块空白,而且只有肉眼才看得出来。所以这里静态核对一遍。 */
+{
+  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+  const defined = new Set(
+    [...html.matchAll(/<symbol id="(i-[a-z]+)"/g)].map(m => m[1]));
+  // 既要匹配静态的 href="#i-x",也要匹配 JS 里 setAttribute 用的 "#i-x"
+  const used = new Set(
+    [...(html + appjs).matchAll(/["']#(i-[a-z]+)["']/g)].map(m => m[1]));
+
+  const missing = [...used].filter(u => !defined.has(u));
+  check(`每个 <use> 都有对应的 symbol(用到 ${used.size} 个)`,
+        missing.length === 0, "引了但没定义:" + missing.join(", "));
+
+  const unused = [...defined].filter(d => !used.has(d));
+  check(`没有定义了却没人用的图标(共 ${defined.size} 个)`,
+        unused.length === 0, "多余的:" + unused.join(", "));
+
+  // 换 emoji 的主要目的就是让 .icon-btn.on 的强调色能生效
+  check("图标用 currentColor 描边(否则 .icon-btn.on 的强调色不起作用)",
+        /\.ic\{[^}]*stroke:currentColor/.test(css));
+
+  check("顶栏和底栏里已经没有 emoji 图标了",
+        !/<i>[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html),
+        "还有 <i>emoji</i> 残留 —— 彩色 emoji 忽略 CSS 的 color");
+
+  // boot() 会取顶栏按钮,index.html 删了按钮而 app.js 没改 = 整个应用白屏
+  for (const id of ["themeBtn", "fitBtn", "maskBtn", "circleBtn"]) {
+    check(`#${id} 在 index.html 和 app.js 里都存在`,
+          html.includes(`id="${id}"`) && appjs.includes(`#${id}`));
+  }
+  check("app.js 里没有对已移除的 #facBtn 的引用(有的话 boot 会抛异常白屏)",
+        !appjs.includes("facBtn"));
+  check("派系着色的开关搬到了设置页并绑上了",
+        appjs.includes('id="facSw"') && appjs.includes('$("#facSw").onchange'));
+}
+
 console.log("\n设计 token 体系(防止改回散装数值)");
 /* 这几条不是"风格洁癖"。半像素字号在 Windows 上会被字体舍入,
    造成"看起来没对齐但说不出哪里不对";而 --fs-form 低于 16px 会让

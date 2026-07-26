@@ -155,6 +155,19 @@ body{
 .spacer{flex:1}
 button{font-family:inherit;color:inherit}
 
+/* ---------------- 图标 ----------------
+   描边参数全部继承自这里,symbol 里的 path 保持"裸"的 —— 于是同一份路径
+   在 40px 的顶栏按钮和 22px 的底栏里,视觉粗细是一致的。
+   stroke:currentColor 让图标自动吃 color,.icon-btn.on 的强调色因此生效
+   (这是换掉 emoji 的主要目的:彩色 emoji 完全忽略 color)。 */
+.ic{
+  width:20px;height:20px;flex:none;display:block;
+  fill:none;stroke:currentColor;stroke-width:1.75;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+.ic.sm{width:16px;height:16px;stroke-width:2}
+.ic.lg{width:22px;height:22px;stroke-width:1.6}
+
 /* ---------------- 顶栏 ---------------- */
 
 #topbar{
@@ -403,7 +416,7 @@ button{font-family:inherit;color:inherit}
 }
 #aiInput::placeholder{color:var(--dim)}
 .ai-btn{
-  width:32px;height:32px;flex:none;border-radius:var(--r-md);
+  width:36px;height:36px;flex:none;border-radius:var(--r-md);
   border:0;background:var(--bg-3);color:var(--text-2);
   display:flex;align-items:center;justify-content:center;font-size:var(--fs-base);
 }
@@ -433,10 +446,12 @@ button{font-family:inherit;color:inherit}
   padding:10px 0 8px;display:flex;flex-direction:column;
   align-items:center;gap:3px;
 }
-.navbtn i{font-style:normal;font-size:var(--fs-title);line-height:1;opacity:.85}
+.navbtn .ic{opacity:.85;transition:opacity .15s ease}
 .navbtn span{font-size:var(--fs-micro);letter-spacing:.3px}
-.navbtn.on{color:var(--text)}
-.navbtn.on i{opacity:1}
+/* 选中态以前只让 10px 的小字从灰变白、emoji 从 .85 变 1 —— 这是全 app
+   最重要的导航,却几乎看不出选中了哪个。现在图标也跟着变色。 */
+.navbtn.on{color:var(--accent)}
+.navbtn.on .ic{opacity:1}
 
 /* ---------------- 卡片 ---------------- */
 
@@ -461,11 +476,15 @@ button{font-family:inherit;color:inherit}
   display:flex;align-items:center;justify-content:center;font-size:var(--fs-small);
 }
 
+/* 三档就够。以前调用点各传一个数字(30/34/38/44),
+   于是同一个头像在列表、卡片头、连线卡里出现了四种尺寸。 */
 .avatar{
-  width:42px;height:42px;border-radius:var(--r-full);flex:none;
+  width:44px;height:44px;border-radius:var(--r-full);flex:none;
   display:flex;align-items:center;justify-content:center;
   font-size:var(--fs-title);font-weight:var(--fw-bold);color:var(--node-ink);
 }
+.avatar.sm{width:30px;height:30px;font-size:var(--fs-small)}
+.avatar.md{width:38px;height:38px;font-size:var(--fs-base)}
 .head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
 
 /* ---------------- 列表 / 块 ---------------- */
@@ -543,13 +562,44 @@ label.hstack{min-height:var(--tap);cursor:pointer}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:var(--fs-small)}
 .dimtext{color:var(--dim)}
 
-/* 只有这三个工具类,不再多开。
+/* 只有这几个工具类,不再多开。
    原则:布局用工具类,排版一律用组件类 —— 一旦开了 .mt-8 / .p-12 这种
    一维原子类,等于把内联样式换个写法写回来,不解决任何问题。 */
 .grow{flex:1;min-width:0}
-.hstack{display:flex;align-items:center;gap:8px}
+.hstack{display:flex;align-items:center;gap:var(--sp-2)}
 .hstack.top{align-items:flex-start}
 .hstack.wrap{flex-wrap:wrap}
+.hstack.tight{gap:var(--sp-1)}
+
+/* ---- 组件变体 ----
+   这些都是重复出现过的模式,不是一次性的微调。 */
+
+/* 卡片里的行内小按钮:改名 / 删 / 删关系 */
+.btn.mini{padding:var(--sp-15) var(--sp-3);font-size:var(--fs-small)}
+
+/* AI 审核里的紧凑下拉 */
+.sel-compact{padding:var(--sp-15);font-size:var(--fs-base)}
+.sel-compact.kind{flex:1;min-width:110px}
+.sel-compact.str{width:132px}
+
+/* 关系类别的标记符(♥ ¥ ▪ ● ✎ ⌂ ⚡),以及圈子自己的 emoji */
+.glyph{font-size:var(--fs-title);line-height:1}
+
+/* 列表里的排名序号 */
+.row .rank{width:20px;flex:none;text-align:center}
+
+/* 段落级留白由结构决定,不再逐处写 margin:0 —— 那是把同一件事
+   重复写十几遍,而且总有漏的。 */
+.card > :first-child{margin-top:0}
+.card > :last-child{margin-bottom:0}
+.head .sub{margin-bottom:0}
+.card .hint + .hint{margin-top:var(--sp-2)}
+
+/* 卡片内的紧凑输入区 */
+textarea.compact{min-height:80px}
+
+/* 列表为空时的占位行 */
+.empty-line{padding:var(--sp-6) 0;text-align:center}
 
 body.masked .blurable{filter:blur(5px);user-select:none}
 body.masked .node .nm,body.masked .node .ini{opacity:.2 !important}
