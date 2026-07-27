@@ -10,6 +10,38 @@ import ipaddress
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _load_env_file():
+    """把项目根目录下的 .env 读进 os.environ。
+
+    为什么要有这个:API Key 只能靠环境变量传进来,而在 Windows 上设一个
+    持久的用户环境变量要开系统设置、还得重开终端才生效 —— 对一个双击
+    run.bat 就该能用的工具来说太重了。
+
+    **绝不要把 Key 写进 run.bat**:那个文件在版本库里,而这个仓库是公开的。
+    .env 从一开始就在 .gitignore 里(连同 .env.* ),提交不上去。
+
+    已经存在的环境变量优先 —— 临时想换个 Key 跑一次,在命令行里设一下
+    就能盖过文件,不用改文件再改回来。
+    """
+    f = ROOT / ".env"
+    try:
+        raw = f.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")     # 顺手剥掉成对的引号
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_env_file()
 DATA_DIR = ROOT / "data"
 BACKUP_DIR = ROOT / "backups"
 WEB_DIR = ROOT / "web"

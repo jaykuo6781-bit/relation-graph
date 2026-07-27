@@ -14,6 +14,7 @@ backups/
 # 密钥与本地配置
 .env
 .env.*
+!env.example
 config.local.py
 secrets.json
 
