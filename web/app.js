@@ -1527,30 +1527,72 @@ function showReview(d) {
     </div>`;
   }).join("");
 
-  const rRows = d.relations.map((r, i) => `
-    <div class="card">
+  /* 一条关系的卡片。**类型默认是收起的** —— AI 大多数时候填对了,
+     不该为了确认一条正确的结果去面对 26 个选项。点摘要那一行才展开
+     两级 chip(复用 renderRelForm 的那套,不另写一份)。
+
+     低置信度或没有原文出处的**默认不勾**:以前是无条件 checked,
+     于是一条 70% 把握的错误关系(真实案例:两个室友被判成「情敌」)
+     只要用户一路点「确认入库」就进库了,而且事后很难发现。 */
+  const LOW_CONF = 0.75;
+
+  function relRow(r, i) {
+    const weak = !r.evidence || r.confidence < LOW_CONF;
+    const why = !r.evidence ? "模型没给出处"
+      : r.confidence < LOW_CONF ? "把握不足" : "";
+    return `
+    <div class="card revrel" data-i="${i}">
       <div class="hstack top">
-        <input type="checkbox" class="rchk" data-i="${i}" checked style="margin-top:3px">
+        <input type="checkbox" class="rchk" data-i="${i}"
+               ${weak ? "" : "checked"} style="margin-top:3px">
         <div class="grow">
           <div class="blurable"><b>${esc(r.a_name)}</b>
             <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
-          <div class="hstack wrap" style="margin-top:var(--sp-15)">
-            <select class="rkind sel-compact kind" data-i="${i}">
-              ${kinds.map(k => `<option ${k === r.kind ? "selected" : ""}>${esc(k)}</option>`).join("")}
-            </select>
-            <select class="rstr sel-compact str" data-i="${i}">
-              ${[3, 2, 1, 0, -1, -2, -3].map(v =>
-                `<option value="${v}" ${v === r.strength ? "selected" : ""}>${
-                  v > 0 ? "+" : ""}${v} ${STRENGTH_LABEL[v]}</option>`).join("")}
-            </select>
-          </div>
-          <div class="evidence blurable">${esc(r.evidence)
-            || "(模型没给出处 —— 建议取消勾选)"}</div>
+
+          <button class="btn mini kindsum" data-i="${i}">
+            ${esc(r.glyph || "")} ${esc(r.kind)}
+            ${r.strength > 0 ? "+" : ""}${r.strength}
+            ${esc(STRENGTH_LABEL[r.strength] || "")} ▾</button>
+          <div class="kindbox hidden" data-i="${i}"></div>
+
+          ${r.evidence ? `<div class="evidence blurable">${esc(r.evidence)}</div>` : ""}
           <div class="meta dimtext">把握 ${Math.round(r.confidence * 100)}%
-            ${!r.a_id || !r.b_id ? " · 含新人物" : ""}</div>
+            ${!r.a_id || !r.b_id ? " · 含新人物" : ""}
+            ${why ? ` · <b>${why},已默认不勾</b>` : ""}</div>
         </div>
       </div>
-    </div>`).join("");
+    </div>`;
+  }
+
+  /* 推导出来的那些。标题必须写清楚"不是原文说的" —— 整个审核流程的价值
+     建立在"每条都附原文,扫一眼就知道它有没有编"上,把机器推出来的东西
+     混进抽取结果里会毁掉这个前提。所以单独一段,而且依据不用 .evidence
+     样式(那个带左边框,是"引用"的视觉语言)。 */
+  function derivedRow(r, i) {
+    return `
+    <div class="card revrel" data-i="${i}">
+      <div class="hstack top">
+        <input type="checkbox" class="rchk" data-i="${i}" style="margin-top:3px">
+        <div class="grow">
+          <div class="blurable"><b>${esc(r.a_name)}</b>
+            <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
+          <button class="btn mini kindsum" data-i="${i}">
+            ${esc(r.glyph || "")} ${esc(r.kind)}
+            ${r.strength > 0 ? "+" : ""}${r.strength} ▾</button>
+          <div class="kindbox hidden" data-i="${i}"></div>
+          <div class="hint blurable">${esc(r.derived_note || "")}</div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // 分两段渲染,但 data-i 一律用**原数组下标** —— 提交时按下标回填,
+  // 用分段后的序号会张冠李戴
+  const idx = d.relations.map((r, i) => i);
+  const said = idx.filter(i => !d.relations[i].derived);
+  const guessed = idx.filter(i => d.relations[i].derived);
+  const rRows = said.map(i => relRow(d.relations[i], i)).join("");
+  const gRows = guessed.map(i => derivedRow(d.relations[i], i)).join("");
 
   openSheet(`
     <h3>AI 读出来这些</h3>
@@ -1560,13 +1602,88 @@ function showReview(d) {
     <div class="sec">人物(${people.length})</div>
     <div class="list">${pRows || '<div class="dimtext">没有新人物</div>'}</div>
 
-    <div class="sec">关系(${d.relations.length})</div>
+    <div class="sec">从材料里读到的(${said.length})</div>
     ${rRows || '<div class="dimtext">没抽到关系 —— 换个说法再试,或手动录入</div>'}
+
+    ${gRows ? `<div class="sec">由已有关系推出来的(${guessed.length})</div>
+      <div class="hint">这几条<b>不是原文说的</b>,是根据库里已有的关系推出来的
+        —— 传递性多数时候成立但不绝对,所以默认都不勾,你点头才入库。</div>
+      ${gRows}` : ""}
 
     <div class="btn-row">
       <button class="btn primary" id="reviewOk">确认入库</button>
       <button class="btn" onclick="closeSheets()">放弃</button>
     </div>`);
+
+  /* 类型选择器:点摘要才展开。用事件委托而不是给每行绑 —— 抽到十条时
+     那就是十份监听,而且展开后的 chip 是动态生成的,逐个绑还得重绑。 */
+  const relBody = $("#sheetBody");
+  relBody.addEventListener("click", ev => {
+    const sum = ev.target.closest(".kindsum");
+    if (sum) {
+      const i = sum.dataset.i;
+      const box = relBody.querySelector(`.kindbox[data-i="${i}"]`);
+      const open = !box.classList.contains("hidden");
+      if (open) { box.classList.add("hidden"); return; }
+      paintRevKind(i);
+      box.classList.remove("hidden");
+      return;
+    }
+    const c = ev.target.closest(".kindbox [data-cat],.kindbox [data-kind]");
+    if (!c) return;
+    const box = c.closest(".kindbox");
+    const i = box.dataset.i;
+    if (c.dataset.cat) box.dataset.cat = c.dataset.cat;
+    else setRevKind(i, c.dataset.kind);
+    paintRevKind(i);
+  });
+  relBody.addEventListener("input", ev => {
+    if (!ev.target.classList.contains("revstr")) return;
+    const i = ev.target.dataset.i;
+    document.querySelector(`.revrel[data-i="${i}"]`).dataset.strength = ev.target.value;
+    paintRevSummary(i);
+  });
+
+  function curKind(i) {
+    const row = document.querySelector(`.revrel[data-i="${i}"]`);
+    return row.dataset.kind || d.relations[+i].kind;
+  }
+  function curStr(i) {
+    const row = document.querySelector(`.revrel[data-i="${i}"]`);
+    return row.dataset.strength != null
+      ? +row.dataset.strength : d.relations[+i].strength;
+  }
+  function setRevKind(i, k) {
+    const row = document.querySelector(`.revrel[data-i="${i}"]`);
+    row.dataset.kind = k;
+    // 换了类型就把强度重置成该类型的默认值 —— 保留旧强度会得到
+    // 「敌对 +2」这种自相矛盾的组合
+    row.dataset.strength = S.state.kinds[k].default;
+    paintRevSummary(i);
+  }
+  function paintRevSummary(i) {
+    const k = curKind(i), v = curStr(i);
+    const g = S.state.category_glyph[S.state.kinds[k].cat] || "";
+    document.querySelector(`.kindsum[data-i="${i}"]`).innerHTML =
+      `${esc(g)} ${esc(k)} ${v > 0 ? "+" : ""}${v} ` +
+      `${esc(STRENGTH_LABEL[v] || "")} ▾`;
+  }
+  function paintRevKind(i) {
+    const box = relBody.querySelector(`.kindbox[data-i="${i}"]`);
+    const k = curKind(i);
+    const cat = box.dataset.cat || S.state.kinds[k].cat;
+    const st = S.state;
+    box.innerHTML =
+      `<div class="hstack wrap" style="margin-top:var(--sp-2)">` +
+      st.categories.map(c => chip("data-cat", c,
+        `${esc(st.category_glyph[c] || "")} ${esc(c)}`, c === cat)).join("") +
+      `</div><div class="hstack wrap" style="margin-top:var(--sp-1)">` +
+      Object.keys(st.kinds).filter(x => st.kinds[x].cat === cat)
+        .map(x => chip("data-kind", x, esc(x), x === k)).join("") +
+      `</div><label>强度</label>` +
+      `<input type="range" class="revstr" data-i="${i}" min="-3" max="3" ` +
+      `step="1" value="${curStr(i)}">`;
+  }
 
   $("#reviewOk").onclick = async () => {
     const persons = people.map((p, i) => {
@@ -1580,12 +1697,18 @@ function showReview(d) {
         accepted: $(`.pchk[data-i="${i}"]`).checked,
       };
     });
-    const relations = d.relations.map((r, i) => ({
-      ...r,
-      kind: $(`.rkind[data-i="${i}"]`).value,
-      strength: +$(`.rstr[data-i="${i}"]`).value,
-      accepted: $(`.rchk[data-i="${i}"]`).checked,
-    }));
+    const relations = d.relations.map((r, i) => {
+      // 类型/强度默认没被碰过就用 AI 填的那份;改过的话 revRel 会把新值
+      // 写进这一行的 dataset(收起状态下 DOM 里根本没有选择器可读)
+      const row = document.querySelector(`.revrel[data-i="${i}"]`);
+      return {
+        ...r,
+        kind: (row && row.dataset.kind) || r.kind,
+        strength: row && row.dataset.strength != null
+          ? +row.dataset.strength : r.strength,
+        accepted: $(`.rchk[data-i="${i}"]`).checked,
+      };
+    });
     busy(true, "写入中…");
     try {
       const res = await api("/api/ingest/commit", {

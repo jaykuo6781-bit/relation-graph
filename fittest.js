@@ -704,12 +704,16 @@ console.log("\n手动录入(加人 / 加关系 / 改强度 / 记一笔)");
      「不用原生 select」「绝不预热 /api/graph」,连注释一起数必然误报。 */
   const code = ajs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-  // 选人不能用原生 <select>:iOS 上 100 个 option 是只能盲滚的滚轮
+  /* 选人不能用原生 <select>:iOS 上 100 个 option 是只能盲滚的滚轮。
+     基线从 3 收紧到 1:v7 把 AI 审核里那两个(关系类型 26 项平铺 +
+     强度)换成了收起式的两级 chip,现在全 app 只剩「我是谁」那一个
+     —— 那个是单选一个人、选项就是人名,原生控件反而合适。
+     **这是收紧不是放宽**:留着 3 等于"退回去也能通过",断言就白写了。 */
   const selects = (code.match(/<select/g) || []).length;
-  check(`选人是自建下拉,原生 <select> 没有增加(${selects} 个:我是谁 + AI 审核两个)`,
-        selects === 3 && /data-plist="\$\{slot\}"/.test(ajs) &&
+  check(`原生 <select> 只剩 ${selects} 个(只该有「我是谁」)`,
+        selects === 1 && /data-plist="\$\{slot\}"/.test(ajs) &&
         /data-new="1"/.test(ajs),
-        "多出来的 <select> 多半是拿它当选人用了");
+        "多出来的 <select> 多半是拿它当选人或选关系类型用了");
   check("「＋ 新建「XXX」」这一行就是加人入口",
         /data-new/.test(ajs) && /createPersonInline/.test(ajs));
   /* 人物页改成"只建一次、之后只翻 hidden"之后,搜索键预存进了 data-q,
@@ -1558,6 +1562,49 @@ console.log("\n卡片定位与 dialog 的显隐(真机上栽过两次)");
   }
   check("gesture 监听是 passive:false(passive 下 preventDefault 无效)",
         /gesturestart[\s\S]{0,240}passive: false/.test(gjs));
+}
+
+console.log("\nAI 审核界面(v7:收起噪音、低置信不勾、推导分段)");
+{
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+
+  /* 类型默认收起。AI 大多数时候填对了,不该为了确认一条正确的结果
+     去面对 26 个选项 —— 而在 v7 之前那就是一个平铺的 <select>。 */
+  check("关系类型默认是收起的(.kindbox 初始带 hidden)",
+        /class="kindbox hidden"/.test(appjs));
+  check("摘要按钮点了才展开", /closest\("\.kindsum"\)/.test(appjs));
+  check("展开后复用 chip() 而不是又写一份平铺 select",
+        /paintRevKind[\s\S]{0,700}chip\("data-cat"/.test(appjs) &&
+        /paintRevKind[\s\S]{0,900}chip\("data-kind"/.test(appjs));
+  check("审核界面里不再有 26 项平铺的 rkind select",
+        !/class="rkind/.test(appjs), "老的平铺下拉还在");
+
+  /* 低置信度默认不勾。真实事故:一条 70% 把握的「情敌」默认打勾,
+     用户一路点确认就进库了,事后极难发现。 */
+  check("低置信度/无出处的默认不勾选",
+        /const weak = !r\.evidence \|\| r\.confidence < LOW_CONF/.test(appjs));
+  check("不勾的原因写在界面上,不是静默处理",
+        /已默认不勾/.test(appjs));
+
+  /* 推导段必须和抽取段分开,而且依据不能用 .evidence 样式 ——
+     那个样式带左边框,是"原文引用"的视觉语言。把机器推出来的话
+     放进去,就毁掉了"每条都附原文"这个整个审核流程赖以成立的前提。 */
+  check("推导单独一段", /由已有关系推出来的/.test(appjs));
+  check("推导段写明了「不是原文说的」", /不是原文说的/.test(appjs));
+  check("推导依据不用 .evidence 样式",
+        /function derivedRow[\s\S]{0,700}class="hint blurable"/.test(appjs) &&
+        !/function derivedRow[\s\S]{0,700}class="evidence/.test(appjs));
+  check("推导行默认不勾(没有 checked)",
+        !/function derivedRow[\s\S]{0,600}checked/.test(appjs));
+
+  /* 分两段渲染后最容易错的地方:提交时按下标回填,用分段后的序号
+     会张冠李戴 —— 把 A 的类型写到 B 头上,而且看起来完全正常。 */
+  check("分段渲染但 data-i 用原数组下标",
+        /const idx = d\.relations\.map\(\(r, i\) => i\)/.test(appjs) &&
+        /said\.map\(i => relRow\(d\.relations\[i\], i\)\)/.test(appjs));
+
+  check("换类型时强度重置成该类型的默认值(否则会有「敌对 +2」)",
+        /setRevKind[\s\S]{0,400}S\.state\.kinds\[k\]\.default/.test(appjs));
 }
 
 console.log("\n" + "=".repeat(52));

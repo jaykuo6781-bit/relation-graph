@@ -550,6 +550,89 @@ def main():
     db.delete_circle(sandbox)          # 收拾干净,后面的用例不受影响
     db.delete_person(zw["id"])
 
+    # ---------------- v7:词表缺口与传递推导 ----------------
+    print("\n词表:轻微负面(「情敌」那个错的直接根因)")
+    fr = db.RELATION_KINDS.get("有摩擦")
+    check("词表里有「有摩擦」", fr is not None)
+    if fr:
+        check("它是负向的", fr["sign"] < 0, f"实际 {fr.get('sign')}")
+        check("默认强度是 -1(轻,不是 -2/-3 的重型)",
+              fr["default"] == -1, f"实际 {fr.get('default')}")
+        check("它是无向的", fr.get("directed") == 0)
+    # 这条才是真正的守门人:在它之前,五个负向全是 -2/-3,
+    # 模型读到"有点不开心"只能硬套一个重型类型
+    light = [k for k, v in db.RELATION_KINDS.items()
+             if v["sign"] < 0 and abs(v["default"]) == 1]
+    check("至少存在一个 -1 的负向选项供模型落脚", len(light) >= 1,
+          f"实际 {light}")
+
+    print("\n传递推导(代码算,不交给模型)")
+    rc = db.create_circle("_推导测试", "自定义")
+    for nm in ("甲宿", "乙宿", "丙宿"):
+        db.upsert_person(nm, circle_id=rc)
+    rid = {p["name"]: p["id"] for p in db.list_people(rc)}
+    db.upsert_relation(rc, rid["甲宿"], rid["乙宿"], "室友", 2)
+
+    got = analysis.derive_transitive(
+        rc, [{"a_name": "甲宿", "b_name": "丙宿", "kind": "室友"}])
+    pair = {frozenset((r["a_name"], r["b_name"])) for r in got}
+    check("A—C 和 B—C 都是室友 → 推出 A—B",
+          frozenset(("乙宿", "丙宿")) in pair, f"实际 {[sorted(x) for x in pair]}")
+    if got:
+        r0 = [r for r in got if frozenset((r["a_name"], r["b_name"]))
+              == frozenset(("乙宿", "丙宿"))][0]
+        check("推导依据里写明了经由谁", "甲宿" in r0["derived_note"],
+              r0["derived_note"])
+        check("默认不勾选", r0["accepted"] is False)
+        check("标了 derived", r0["derived"] is True)
+        # evidence 在界面上是当"原文引用"呈现的,塞机器生成的话进去
+        # 就是把推测伪装成证据 —— 整个审核流程的价值全靠这个区分
+        check("**不**占用 evidence 字段", "evidence" not in r0)
+
+    db.upsert_relation(rc, rid["乙宿"], rid["丙宿"], "室友", 2)
+    check("已经存在的对不再重复提议",
+          analysis.derive_transitive(
+              rc, [{"a_name": "甲宿", "b_name": "丙宿", "kind": "室友"}]) == [])
+
+    check("与本次录入无关的对不提议",
+          analysis.derive_transitive(
+              rc, [{"a_name": "张三", "b_name": "李四", "kind": "朋友"}]) == [])
+
+    # 防爆炸:12 人共享一个室友,完全闭包是 66 条
+    bc = db.create_circle("_大宿舍", "自定义")
+    db.upsert_person("舍长测", circle_id=bc)
+    hub = db.find_person_by_name("舍长测")["id"]
+    for i in range(12):
+        db.upsert_person(f"住户测{i}", circle_id=bc)
+        db.upsert_relation(bc, hub,
+                           db.find_person_by_name(f"住户测{i}")["id"], "室友", 2)
+    big = analysis.derive_transitive(
+        bc, [{"a_name": "住户测0", "b_name": "舍长测", "kind": "室友"}])
+    check(f"上限生效:完全闭包 66 条,实际提议 {len(big)} 条",
+          len(big) <= analysis.DERIVE_LIMIT)
+
+    # 同事绝不能参与推导 —— 100 人公司同部门互推是几千条边
+    cc = db.create_circle("_同事测试", "公司")
+    for nm in ("同甲", "同乙", "同丙"):
+        db.upsert_person(nm, dept="技术部", circle_id=cc)
+    ci = {p["name"]: p["id"] for p in db.list_people(cc)}
+    db.upsert_relation(cc, ci["同甲"], ci["同丙"], "同事", 1)
+    db.upsert_relation(cc, ci["同乙"], ci["同丙"], "同事", 1)
+    check("「同事」不参与推导(防爆炸的守门人)",
+          analysis.derive_transitive(
+              cc, [{"a_name": "同甲", "b_name": "同丙", "kind": "同事"}]) == [])
+    check("推导名单只有室友和同学",
+          set(analysis.TRANSITIVE_KINDS) == {"室友", "同学"},
+          f"实际 {analysis.TRANSITIVE_KINDS}")
+
+    for c in (rc, bc, cc):
+        db.delete_circle(c)
+    for nm in ["甲宿", "乙宿", "丙宿", "舍长测", "同甲", "同乙", "同丙"] + \
+              [f"住户测{i}" for i in range(12)]:
+        pp = db.find_person_by_name(nm)
+        if pp:
+            db.delete_person(pp["id"])
+
     # ---------------- 布局 ----------------
     print("\n布局引擎")
     for name, c in (("公司圈", company), ("同学圈", klass)):

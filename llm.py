@@ -15,6 +15,7 @@ import base64
 import difflib
 import json
 
+import analysis
 import config
 import db
 
@@ -73,7 +74,18 @@ strength 取 -3 到 3 的整数:
 - 只抽取材料里真实提到的内容,不要根据常识补充推断。
 - 有方向的关系(师徒、提携、上下级、单恋、好感、金钱借贷、师生):\
 a 是师傅/提携者/上级/暗恋者/出借方。
-- "情敌"指两人喜欢同一个对象而互相竞争,是负向关系。{roster_block}"""
+
+关于负面关系(这里最容易出错,请逐条照做):
+- 读得出有负面情绪、但**说不清具体是哪一种矛盾**时,一律用"有摩擦",\
+并给一个低 confidence。不要为了从列表里选一个而硬套具体类型 —— \
+"有点不开心""闹了别扭""有意见""抱怨了几句"全都属于这一类。
+- "情敌"**只在材料明确提到两人争夺同一个感情对象时**才能用。\
+仅仅是不高兴、有矛盾、关系紧张,都不是情敌。
+- "敌对""宿怨"是 -3 的重型关系,只在材料明确表现出长期、强烈的对立时才用。
+- "竞争""利益冲突"要材料里真的提到了竞争或利益上的冲突,\
+不能因为两人都在同一个部门就推断。
+- 拿不准的宁可不输出这条关系。少抽一条用户可以自己补,\
+抽错一条会污染整张关系图,而且用户往往发现不了 —— 它看起来像一条正常的关系。{roster_block}"""
 
 
 def _schema():
@@ -340,13 +352,23 @@ def _align(raw, source_text, circle_id, n_images=0):
             "accepted": True,
         })
 
+    # 传递推导:A-C 和 B-C 都是室友 -> 建议 A-B 也是。
+    #
+    # **刻意不交给模型做**:这是个确定性的图运算,交给模型会时对时错,
+    # 而且提示词里明写着"不要根据常识补充推断" —— 让它一边守这条一边
+    # 又去推理,只会两头都做不好。代码来做还能给出可复述的依据
+    # ("因为两人都是 Alex 的室友"),顺带也不必把已有关系发给模型服务商。
+    #
+    # 结果和抽取出来的关系放进**同一个数组**,靠 derived 标记区分;
+    # 审核界面分两段渲染,但 data-i 仍用原数组下标。
+    derived = analysis.derive_transitive(circle_id, relation_rows)
     return {
         "source": source_text[:4000],
         "images": n_images,
         "circle_id": circle_id,
         "model": config.LLM_MODEL,
         "persons": person_rows,
-        "relations": relation_rows,
+        "relations": relation_rows + derived,
     }
 
 

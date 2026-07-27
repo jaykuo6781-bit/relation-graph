@@ -868,3 +868,104 @@ def situation(circle_id=None):
         "triangles": unstable_triangles(limit=8, circle_id=circle_id,
                                         g=g)["triangles"],
     }
+
+
+# ============================================================
+#  5. 传递推导 —— 给 AI 摄取用的"你是不是漏了这条"
+# ============================================================
+
+# 只有这两种关系适合做传递闭包:都是**无向**的(directed=0),
+# 而且传递性在现实里真的成立(同一个住处 / 同一个班)。
+#
+# 明确排除的两个,理由不是保守,是算过的:
+#   同事 —— 100 人公司同部门互推,一次就是几千条边,审核界面直接被淹掉;
+#           而且"同部门"这个信息 roster 里本来就有,不需要推
+#   家人 —— 传递性根本不成立:A 和 B 都是 C 的家人,两人可能只是姻亲
+TRANSITIVE_KINDS = ("室友", "同学")
+
+DERIVE_LIMIT = 8
+
+
+def derive_transitive(circle_id, pending=None, kinds=TRANSITIVE_KINDS,
+                      limit=DERIVE_LIMIT):
+    """A—C 和 B—C 都是室友 → 建议 A—B 也是室友。
+
+    返回**建议**,不写库 —— 结果会进 AI 摄取的审核界面,默认不勾选,
+    由用户点头才入库。传递性在现实里只是"多半成立"(C 可能先后住过两个地方),
+    所以它必须是建议而不是自动写入。
+
+    pending:本次 AI 抽出来、还没入库的关系,形如
+        [{"a_name": ..., "b_name": ..., "kind": ...}, ...]
+    全程用**姓名**做键而不是 id:本次新抽到的人还没有 id。
+
+    三条约束,少一条这个功能就会变成骚扰:
+      1. 只提议**至少一端出现在本次录入里**的对 —— 否则每次录入都会把
+         全库已有的闭包重新提一遍,而那些用户上次就已经看过并跳过了
+      2. 只提议那一 kind **尚不存在**的对
+      3. 按共同邻居数排序取前 limit 条 —— 共同邻居越多,推断越站得住
+    """
+    pending = pending or []
+    out = []
+
+    for kind in kinds:
+        # 邻接表(姓名 → 姓名集合),库里已有的 + 本次待入库的一起算
+        adj = {}
+        have = set()          # 已经存在这一 kind 的对,归一成 (小, 大)
+
+        def link(x, y):
+            if not x or not y or x == y:
+                return
+            adj.setdefault(x, set()).add(y)
+            adj.setdefault(y, set()).add(x)
+            have.add((min(x, y), max(x, y)))
+
+        for r in db.list_relations_detailed(circle_id):
+            if r["kind"] == kind:
+                link(r["a_name"], r["b_name"])
+        touched = set()       # 本次录入涉及到的人
+        for r in pending:
+            touched.add(r.get("a_name"))
+            touched.add(r.get("b_name"))
+            if r.get("kind") == kind:
+                link(r.get("a_name"), r.get("b_name"))
+        touched.discard(None)
+
+        # 找出所有"共同邻居 ≥1 但彼此还没连"的对
+        cand = {}
+        for mid, nbrs in adj.items():
+            for a, b in itertools.combinations(sorted(nbrs), 2):
+                key = (min(a, b), max(a, b))
+                if key in have:
+                    continue
+                # 约束 1:与本次录入无关的对不提 —— 那些是历史遗留,
+                # 用户上一次就已经看过并选择跳过了
+                if a not in touched and b not in touched:
+                    continue
+                slot = cand.setdefault(key, {"vias": []})
+                slot["vias"].append(mid)
+
+        info = db.RELATION_KINDS.get(kind, {})
+        for (a, b), slot in cand.items():
+            vias = sorted(set(slot["vias"]))
+            out.append({
+                "a_name": a, "b_name": b,
+                "kind": kind,
+                "strength": info.get("default", 1),
+                "cat": info.get("cat", "社交"),
+                "glyph": db.CATEGORY_GLYPH.get(info.get("cat", "社交"), ""),
+                "vias": vias,
+                "derived": True,
+                # 说明为什么会推出这条。**绝不能塞进 evidence** ——
+                # 那个字段在界面上是当"原文引用"呈现的,把一句机器生成的话
+                # 放进去就是在伪装成证据,而整个审核流程的价值恰恰建立在
+                # "每条都附原文,扫一眼就知道它有没有编"上。
+                "derived_note": (
+                    f"{a} 和 {b} 都是 {'、'.join(vias[:3])} 的{kind}"
+                    + ("等" if len(vias) > 3 else "")),
+                "confidence": 0.5,
+                "accepted": False,       # 默认不勾
+            })
+
+    # 共同邻居多的排前面;同分时按名字,保证结果可复现
+    out.sort(key=lambda r: (-len(r["vias"]), r["a_name"], r["b_name"]))
+    return out[:limit]
