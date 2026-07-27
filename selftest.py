@@ -708,10 +708,15 @@ def main():
               for e in p_class["edges"]))
 
     # 缓存键现在带画布档位 —— 不同屏幕比例各存一份,互不覆盖
-    cached = db.cache_get(f"graph_payload_{company['id']}_square")
+    # 键里带算法版本:改了布局算法,旧缓存自动作废(否则改了没效果,
+    # 而且极难查 —— 这个坑刚踩过)
+    _v = layout.LAYOUT_VERSION
+    cached = db.cache_get(f"graph_payload_v{_v}_{company['id']}_square")
     check("布局结果进了缓存(第二次不再重算)", cached is not None)
+    check("上一个算法版本的缓存键取不到东西(改了算法就该重算)",
+          db.cache_get(f"graph_payload_v{_v - 1}_{company['id']}_square") is None)
     check("不同画布档位各自缓存",
-          db.cache_get(f"graph_payload_{company['id']}_wide") is None,
+          db.cache_get(f"graph_payload_v{_v}_{company['id']}_wide") is None,
           "宽屏档位不该被方形档位的结果污染")
 
     # ---------------- 结果 ----------------

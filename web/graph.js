@@ -266,7 +266,7 @@ const GraphView = (() => {
     for (const rec of it.edges) {
       const A = pos.get(rec.e.a), B = pos.get(rec.e.b);
       if (!A || !B) continue;
-      const a = GraphRender.arc(A.x, A.y, B.x, B.y, cap);
+      const a = GraphRender.arc(A.x, A.y, B.x, B.y, cap, rec.e.bend);
       const d = `M${A.x.toFixed(1)},${A.y.toFixed(1)} ` +
                 `Q${a.cx.toFixed(1)},${a.cy.toFixed(1)} ` +
                 `${B.x.toFixed(1)},${B.y.toFixed(1)}`;
@@ -904,11 +904,14 @@ const GraphRender = (() => {
   }
 
   /* 一条弧线的控制点与曲线中点。拖动时端点变了,这些都要跟着重算。 */
-  function arc(x1, y1, x2, y2, cap) {
+  /* bend 是服务端算好的弯曲系数(默认 1,为了绕开挡路的节点会加大或翻转)。
+     拖动时必须用**同一个系数**重算,否则一拖这条边就跳回默认弧度,
+     又穿回别人的球心上去。 */
+  function arc(x1, y1, x2, y2, cap, bend) {
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy) || 1;
     const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-    const off = Math.min(CURVE * len, cap);
+    const off = Math.min(CURVE * len, cap) * (bend == null ? 1 : bend);
     const cx = mx + (-dy / len) * off, cy = my + (dx / len) * off;
     return { cx, cy,
              qx: 0.25 * x1 + 0.5 * cx + 0.25 * x2,
@@ -968,11 +971,17 @@ const GraphRender = (() => {
        正好复用已有的流光渐变机制,零额外成本、不用 filter。 */
     if (e.mixed) {
       return head +
+        /* 中间是**渐变过渡**,不是硬切换。硬切换踩过一次真实事故:
+           一条 Luna→X 的混合边正好从 Alex 的球心穿过去(离球心 1.7px),
+           而换色点落在 47% —— 画面上读起来成了"Luna 连 Alex(青),
+           Alex 连 X(红)",一条边被看成两条,还连错了人。
+           穿心那件事由服务端的避让算法治(layout._clear_bend),
+           这里再补一道:没有硬边界,就不会有"两条线在此交汇"的错觉。 */
         `<stop offset="0%"   stop-color="var(--pos)" stop-opacity="0.10"/>` +
-        `<stop offset="26%"  stop-color="var(--pos)" stop-opacity="1"/>` +
-        `<stop offset="50%"  stop-color="var(--pos)" stop-opacity="0.9"/>` +
-        `<stop offset="50%"  stop-color="var(--neg)" stop-opacity="0.9"/>` +
-        `<stop offset="74%"  stop-color="var(--neg)" stop-opacity="1"/>` +
+        `<stop offset="22%"  stop-color="var(--pos)" stop-opacity="1"/>` +
+        `<stop offset="38%"  stop-color="var(--pos)" stop-opacity="0.95"/>` +
+        `<stop offset="62%"  stop-color="var(--neg)" stop-opacity="0.95"/>` +
+        `<stop offset="78%"  stop-color="var(--neg)" stop-opacity="1"/>` +
         `<stop offset="100%" stop-color="var(--neg)" stop-opacity="0.10"/>` +
         `</linearGradient>`;
     }

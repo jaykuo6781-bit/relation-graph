@@ -57,7 +57,22 @@ MAX_CANVAS_SCALE = 2.6
 # 画面立刻变成一团意面,这是 v2 最毁观感的一条。
 # 短边保留优雅的小弧,长边几乎拉直,才是成熟图谱工具的做法。
 CURVE = 0.10                # 弦长比例
-CURVE_CAP_RATIO = 0.034     # 上限 = 画布对角线 × 这个比例
+CURVE_CAP_RATIO = 0.034
+
+# 边要离开第三方节点的边缘多少才算"不挡路"。给 6px 是因为线本身有宽度
+# (最粗的边 2.2px)加上球的亮边描边,贴着画过去仍然会被读成"连在一起"。
+EDGE_CLEAR = 6.0
+
+# 布局算法的版本号。**改了任何影响布局结果的东西就要 +1。**
+#
+# 缓存只按 graph_version(数据版本)失效 —— 数据没变时,改了算法照样返回
+# 旧结果。这个坑刚踩过:边避让写完之后实测毫无变化,查了一圈才发现
+# 是缓存在挡着,而不是算法不对。把版本号放进缓存键,代码一改缓存自动作废。
+LAYOUT_VERSION = 3
+
+# 避让最多把边弯到默认弧度的几倍。也是粗筛边距的依据 ——
+# 两处必须用同一个数,否则粗筛会漏掉真正会被撞上的节点。
+MAX_BEND = 3.4     # 上限 = 画布对角线 × 这个比例
 
 # ---- 向心力:不再是拍脑袋的常数,而是按画布形状算出来的 ----
 #
@@ -168,7 +183,7 @@ def canvas_of(bucket, n_nodes=None):
 
 
 def _seed_key(circle_id, bucket):
-    return f"layout_seed_{circle_id or 'all'}_{bucket}"
+    return f"layout_seed_v{LAYOUT_VERSION}_{circle_id or 'all'}_{bucket}"
 
 
 def _load_seed(circle_id, bucket, w, h):
@@ -485,7 +500,48 @@ def compute(nodes, pos_adj, neg_adj, factions, circle_id=None,
     return {v: (pos[v][0], pos[v][1]) for v in nodes}
 
 
-def _arc(x1, y1, x2, y2, cap):
+def _clear_bend(x1, y1, x2, y2, cap, blockers):
+    """挑一个不会从别人球心穿过去的弯曲系数。
+
+    真实事故:Luna 和 X 之间那条边,离 Alex 的球心只有 **1.7px**(Alex 半径 23),
+    等于从他正中间穿过去。而它又是一条混合边(青红双色、在中点换色),
+    换色点正好落在 47% —— 于是画面上读起来是"Luna 连到 Alex(青),
+    Alex 连到 X(红)",一条边被看成了两条,而且连错了人。
+
+    默认的弯曲只保证同一条边每次朝同一边弯(不闪),不管会不会撞上谁。
+    这里按顺序试几个系数,取第一个能让整条曲线离所有第三方节点都够远的:
+    先试原样,再试加大,再试翻到另一边。翻边是有代价的(同一对人两次渲染
+    可能朝不同方向弯),所以放在加大之后 —— 只有实在绕不开才翻。
+
+    全部试完都不行就返回最后一个:让它弯到最大,总好过笔直穿心。
+    """
+    if not blockers:
+        return 1.0
+    for mult in (1.0, 1.8, 2.6, -1.8, -2.6, MAX_BEND, -MAX_BEND):
+        cx, cy, _, _ = _arc(x1, y1, x2, y2, cap, mult)
+        if _curve_clears(x1, y1, cx, cy, x2, y2, blockers):
+            return mult
+    return MAX_BEND
+
+
+def _curve_clears(x1, y1, cx, cy, x2, y2, blockers, samples=24):
+    """曲线上每一点都离这些球够远吗。
+
+    只取 24 个采样点:节点半径最小 17,而相邻采样点在一条典型的边上
+    相距不到 30px,穿心这种情况漏不掉。采太密没有意义,这是每条边都要跑的。
+    """
+    for i in range(samples + 1):
+        t = i / samples
+        u = 1.0 - t
+        bx = u * u * x1 + 2 * u * t * cx + t * t * x2
+        by = u * u * y1 + 2 * u * t * cy + t * t * y2
+        for nx, ny, need in blockers:
+            if (bx - nx) ** 2 + (by - ny) ** 2 < need * need:
+                return False
+    return True
+
+
+def _arc(x1, y1, x2, y2, cap, bend=1.0):
     """算出一条弧线的控制点,以及曲线中点(标签和标记符落在这里)。
 
     弯曲方向由端点坐标唯一决定,所以同一条边每次渲染都朝同一边弯,
@@ -498,7 +554,10 @@ def _arc(x1, y1, x2, y2, cap):
     mx, my = (x1 + x2) / 2, (y1 + y2) / 2
     # 垂直于弦的单位向量
     px, py = -dy / length, dx / length
-    off = min(CURVE * length, cap)
+    # bend 是弯曲系数:1.0 是默认,加大用来绕开挡路的节点,负数则翻到另一边。
+    # 它必须**随 payload 一起送到前端** —— 拖动时前端要用同一个系数重算路径,
+    # 否则一拖边就跳回默认弧度,又穿回别人身上。
+    off = min(CURVE * length, cap) * bend
     cx, cy = mx + px * off, my + py * off
     # 二次贝塞尔在 t=0.5 处的点
     qx = 0.25 * x1 + 0.5 * cx + 0.25 * x2
@@ -549,7 +608,7 @@ def get_graph_payload(circle_id=None, aspect=None):
     手机端拿到后直接画,不做任何计算。
     """
     bucket = bucket_of(aspect)
-    cache_key = f"graph_payload_{circle_id or 'all'}_{bucket}"
+    cache_key = f"graph_payload_v{LAYOUT_VERSION}_{circle_id or 'all'}_{bucket}"
     cached = db.cache_get(cache_key)
     if cached is not None:
         return cached
@@ -585,6 +644,8 @@ def get_graph_payload(circle_id=None, aspect=None):
     node_span = 16.0 * shrink
 
     nodes = []
+
+    radius = {}      # 节点 id -> 半径,算边的避让时要用
     for pid in nodes_ids:
         p = people[pid]
         x, y = pos.get(pid, (WIDTH / 2, HEIGHT / 2))
@@ -605,8 +666,10 @@ def get_graph_payload(circle_id=None, aspect=None):
             "friends": len(g["pos_adj"].get(pid, {})),
             "enemies": len(g["neg_adj"].get(pid, {})),
         })
+        radius[pid] = nodes[-1]["r"]
 
     curve_cap = CURVE_CAP_RATIO * math.hypot(WIDTH, HEIGHT)
+    max_r = max(radius.values()) if radius else 20.0
     edges = []
     mixed_pairs = g.get("mixed") or set()
     # 遍历 pair_kinds 而不是 pair_w:综合权重为 0 的混合关系
@@ -621,7 +684,27 @@ def get_graph_payload(circle_id=None, aspect=None):
             continue                 # 真·中性,没什么可画的
         x1, y1 = pos[a]
         x2, y2 = pos[b]
-        cx, cy, qx, qy = _arc(x1, y1, x2, y2, curve_cap)
+        # 挡在中间的节点。先用包围盒粗筛 —— 不筛的话是每条边都要扫一遍全部
+        # 节点,100 人 400 条边就是 4 万次;粗筛之后典型只剩个位数。
+        #
+        # 边距不能只给 EDGE_CLEAR:**曲线会朝一侧鼓出去**,最多鼓
+        # off_max 那么远,而挡路的球自己还有半径。第一版只给了 6px,
+        # 结果一条近乎垂直的边(包围盒是条窄竖条)把 26px 外的节点筛掉了,
+        # 而曲线实际从那人身上 1.1px 处擦过去 —— 避让形同虚设。
+        chord = math.hypot(x2 - x1, y2 - y1)
+        off_max = min(CURVE * chord, curve_cap) * MAX_BEND
+        pad = off_max + max_r + EDGE_CLEAR
+        lo_x, hi_x = min(x1, x2) - pad, max(x1, x2) + pad
+        lo_y, hi_y = min(y1, y2) - pad, max(y1, y2) + pad
+        blockers = []
+        for oid, (ox, oy) in pos.items():
+            if oid in (a, b):
+                continue
+            if not (lo_x <= ox <= hi_x and lo_y <= oy <= hi_y):
+                continue
+            blockers.append((ox, oy, radius.get(oid, 18.0) + EDGE_CLEAR))
+        bend = _clear_bend(x1, y1, x2, y2, curve_cap, blockers)
+        cx, cy, qx, qy = _arc(x1, y1, x2, y2, curve_cap, bend)
         disp = _edge_display(kinds, w, is_mixed)
         pw = g.get("pair_pos", {}).get((a, b), 0)
         nw = g.get("pair_neg", {}).get((a, b), 0)
@@ -635,6 +718,7 @@ def get_graph_payload(circle_id=None, aspect=None):
             "cx": round(cx, 1), "cy": round(cy, 1),   # 贝塞尔控制点
             "mx": round(qx, 1), "my": round(qy, 1),   # 曲线中点(放标记符/标签)
             "w": w,
+            "bend": round(bend, 2),                   # 弯曲系数,拖动时前端要用同一个
             "pw": pw, "nw": nw,                       # 正/负分量,前端画双色用
             "width": round(0.8 + 0.47 * mag, 2),
             **disp,
