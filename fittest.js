@@ -719,9 +719,9 @@ console.log("\n手动录入(加人 / 加关系 / 改强度 / 记一笔)");
   /* 人物页改成"只建一次、之后只翻 hidden"之后,搜索键预存进了 data-q,
      不再每次现拼。但它和选人面板搜的**必须是同一套字段** ——
      所以两处共用 searchKey(),而不是各写一份表达式。 */
-  check("人物页和选人面板共用同一个 searchKey(不是各写一份过滤表达式)",
+  check("所有搜人的地方共用同一个 searchKey(不是各写一份过滤表达式)",
         /function searchKey\(p\)\s*\{\s*\n?\s*return \(p\.name \+ p\.dept \+ p\.title \+ p\.tags\)\.toLowerCase\(\);/.test(ajs) &&
-        (ajs.match(/searchKey\(p\)/g) || []).length === 3 &&
+        (ajs.match(/searchKey\(p\)/g) || []).length >= 3 &&
         !/\(p\.name \+ p\.dept \+ p\.title \+ p\.tags\)\.toLowerCase\(\)\.includes\(q\)/.test(ajs),
         "两处不一样等于同一个词搜出两种结果,而用户只会以为是数据坏了");
   check("空查询按 updated_at 倒序(连着录十条时省打字)",
@@ -1582,7 +1582,8 @@ console.log("\nAI 审核界面(v7:收起噪音、低置信不勾、推导分段)
   /* 低置信度默认不勾。真实事故:一条 70% 把握的「情敌」默认打勾,
      用户一路点确认就进库了,事后极难发现。 */
   check("低置信度/无出处的默认不勾选",
-        /const weak = !r\.evidence \|\| r\.confidence < LOW_CONF/.test(appjs));
+        /const weak = faked \|\| !r\.evidence \|\| r\.confidence < LOW_CONF/
+          .test(appjs));
   check("不勾的原因写在界面上,不是静默处理",
         /已默认不勾/.test(appjs));
 
@@ -1605,6 +1606,45 @@ console.log("\nAI 审核界面(v7:收起噪音、低置信不勾、推导分段)
 
   check("换类型时强度重置成该类型的默认值(否则会有「敌对 +2」)",
         /setRevKind[\s\S]{0,400}S\.state\.kinds\[k\]\.default/.test(appjs));
+}
+
+console.log("\n出处可信 + 批量记一笔(v8)");
+{
+  const appjs = fs.readFileSync(path.join(__dirname, "web", "app.js"), "utf8");
+
+  /* 出处能编,整个审核流程就没了依据 —— 用户判断该不该勾靠的就是扫一眼出处。
+     而且这种编造比编造关系更难发现:关系错了还能凭常识察觉,
+     出处错了用户只会以为原文就是那样。 */
+  check("evidence_ok === false 的行默认不勾",
+        /const faked = r\.evidence_ok === false/.test(appjs) &&
+        /const weak = faked \|\|/.test(appjs));
+  check("并且把原因写在界面上,不是静默处理",
+        /出处在原文里找不到/.test(appjs));
+
+  /* 批量写入必须先预览。最怕的不是建错,是**悄悄覆盖**手工调过的强度 ——
+     upsert 的键是 (circle,a,b,kind),同 kind 直接 UPDATE。 */
+  check("批量提交前必须先预览(没预览时按钮是「预览」)",
+        /pv \?[\s\S]{0,160}bulkSave\(\)[\s\S]{0,160}bulkPreview\(\)/.test(appjs));
+  check("预览区分「新建」和「改动已有」",
+        /将<b>新建 \$\{pv\.create\.length\} 条<\/b>/.test(appjs) &&
+        /改动 \$\{pv\.update\.length\} 条已有的关系/.test(appjs));
+  check("改动已有的那些逐条列出原来的强度(不能只报个数字)",
+        /old_strength/.test(appjs));
+  check("名单或强度一变,旧预览立刻作废",
+        (appjs.match(/B\.preview = null/g) || []).length >= 4);
+
+  /* 复用现成的批量接口,不要循环发 N 次单条 —— 那既慢又会和串行闸打架 */
+  check("走已有的 /api/import/relations/commit,不循环发单条",
+        /bulkSave[\s\S]{0,600}\/api\/import\/relations\/commit/.test(appjs));
+  check("批量写入也上了串行闸",
+        /async function bulkSave[\s\S]{0,120}if \(writing\) return/.test(appjs));
+  check("auto_create 明确传 false(批量入口不该凭空造人)",
+        /auto_create: false/.test(appjs));
+
+  check("「我的朋友」只算正向**情感型**关系,不把同事算进去",
+        /AFFECT = new Set\(\["朋友", "死党"/.test(appjs));
+  check("批量表单没有引入新的原生 <select>",
+        !/renderBulkForm[\s\S]{0,3000}<select/.test(appjs));
 }
 
 console.log("\n" + "=".repeat(52));

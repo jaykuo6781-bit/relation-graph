@@ -581,6 +581,230 @@ function bindSheet() {
   });
 }
 
+
+/* ================= 批量记一笔 =================
+   一组人 × 一个人 × 一个关系类型。
+
+   起因是一句真实的输入:「和我认识的所有朋友都有见过X,都只有一面之缘」——
+   一句话对应十几条关系,手工一条条录不现实,而让 AI 展开也不合适:
+   「我认识的所有朋友」到底指谁本来就模糊(所有正向关系?只算标了"朋友"的?
+   算不算只是同事的?),让用户看着名单勾比让模型猜准得多,
+   而且不用把关系数据发出去。
+
+   **零新接口**:importer.commit_relations 本来就吃 rows(接受带 a_id/b_id
+   的行),直接走已有的 /api/import/relations/commit。 */
+
+const B = {
+  target: null,      // 那"一个人"
+  picked: new Set(),  // 那"一组人"
+  cat: "", kind: "", strength: 0,
+  q: "",
+  preview: null,     // {create: [...], update: [...]}
+};
+
+async function openBulkForm(targetId) {
+  B.target = targetId || null;
+  B.picked = new Set();
+  B.cat = defaultCat();
+  B.kind = "";
+  B.strength = 0;
+  B.q = "";
+  B.preview = null;
+  renderBulkForm();
+}
+
+/* 快捷选人。「我的朋友」取的是与「我」有**正向情感型**关系的人 ——
+   不是所有正向关系:同事 +1 也是正的,但"我所有朋友"显然不该把
+   只是同事的人算进去。 */
+function bulkQuick(which) {
+  const me = S.state.me;
+  const all = S.people.filter(p => p.id !== B.target);
+  if (which === "all") {
+    B.picked = new Set(all.map(p => p.id));
+  } else if (which === "none") {
+    B.picked = new Set();
+  } else if (which === "friends") {
+    if (!me) return toast("还没设置「我是谁」,去设置页设一下");
+    const g = S.graph;
+    if (!g) return toast("图还没载入");
+    const AFFECT = new Set(["朋友", "死党", "情侣", "暧昧", "好感", "派系盟友"]);
+    const ids = new Set();
+    for (const e of g.edges) {
+      if (e.a !== me.id && e.b !== me.id) continue;
+      const kinds = e.all_kinds || [e.label];
+      if (!kinds.some(k => AFFECT.has(k))) continue;
+      const other = e.a === me.id ? e.b : e.a;
+      if (other !== B.target) ids.add(other);
+    }
+    B.picked = ids;
+    if (!ids.size) toast("没找到与「我」有正向社交关系的人");
+  }
+  renderBulkForm();
+}
+
+function bulkRows() {
+  const kind = B.kind;
+  if (!kind || !B.target || !B.picked.size) return [];
+  const t = personById(B.target);
+  return [...B.picked].map(id => {
+    const p = personById(id);
+    return { a_id: id, b_id: B.target, a_name: p ? p.name : "",
+             b_name: t ? t.name : "", kind, strength: B.strength,
+             status: "ok" };
+  });
+}
+
+/* 提交前必须先预览。批量操作最怕的不是建错,是**悄悄覆盖**了你手工调过的
+   强度 —— upsert 的键是 (circle, a, b, kind),同 kind 会直接 UPDATE。
+   所以要把"哪几条是新建、哪几条是改动已有的、原来是多少"逐条列出来。 */
+async function bulkPreview() {
+  const rows = bulkRows();
+  if (!rows.length) return toast("先选人、再选一个关系类型");
+  busy(true, "比对中…");
+  try {
+    const existing = new Map();
+    const d = await api("/api/relations?" + cq());
+    for (const r of d.relations) {
+      if (r.kind !== B.kind) continue;
+      existing.set([r.a_id, r.b_id].sort((x, y) => x - y).join("-"), r);
+    }
+    const create = [], update = [];
+    for (const row of rows) {
+      const key = [row.a_id, row.b_id].sort((x, y) => x - y).join("-");
+      const old = existing.get(key);
+      if (old) update.push({ ...row, old_strength: old.strength });
+      else create.push(row);
+    }
+    B.preview = { create, update };
+    busy(false);
+    renderBulkForm();
+  } catch (e) { busy(false); toast(humanError(e, "比对失败")); }
+}
+
+async function bulkSave() {
+  if (writing) return;
+  const rows = bulkRows();
+  if (!rows.length) return toast("先选人、再选一个关系类型");
+  writing = true;
+  busy(true, `写入 ${rows.length} 条…`);
+  try {
+    const res = await api("/api/import/relations/commit",
+      { rows, circle_id: S.circle.id, auto_create: false });
+    busy(false);
+    closeSheets();
+    S.graphLoaded = false;
+    await refresh();
+    loadGraph();
+    toast(`批量写入 ${res.relations} 条关系`);
+  } catch (e) {
+    busy(false);
+    toast(humanError(e, "批量写入失败"));
+  } finally { writing = false; }
+}
+
+function renderBulkForm() {
+  formKind = "bulk";
+  const st = S.state;
+  const t = personById(B.target);
+  const kinds = Object.keys(st.kinds).filter(k => st.kinds[k].cat === B.cat);
+  const q = B.q.trim().toLowerCase();
+  const list = S.people.filter(p => p.id !== B.target)
+    .filter(p => !q || searchKey(p).includes(q));
+
+  const rows = list.map(p => `
+    <label class="row" style="cursor:pointer">
+      <input type="checkbox" class="bpick" data-id="${p.id}"
+             ${B.picked.has(p.id) ? "checked" : ""}>
+      <div class="main">
+        <div class="nm blurable">${esc(p.name)}</div>
+        <div class="meta">${esc(p.dept || "—")} ${esc(p.title || "")}</div>
+      </div>
+    </label>`).join("") || '<div class="dimtext empty-line">没有匹配的人</div>';
+
+  const pv = B.preview;
+  const pvHtml = !pv ? "" : `
+    <div class="card">
+      <div class="hint" style="margin-top:0">将<b>新建 ${pv.create.length} 条</b>` +
+      (pv.update.length
+        ? `,并<b>改动 ${pv.update.length} 条已有的关系</b>` : "") + `。</div>
+      ${pv.update.length ? `<div class="warnbox">
+        下面这些已经有「${esc(B.kind)}」了,提交会把强度改成 ${B.strength > 0 ? "+" : ""}${B.strength}:<br>
+        ${pv.update.slice(0, 12).map(r =>
+          `<span class="blurable">${esc(r.a_name)}</span>
+           (原 ${r.old_strength > 0 ? "+" : ""}${r.old_strength})`).join("、")}
+        ${pv.update.length > 12 ? ` 等 ${pv.update.length} 条` : ""}
+      </div>` : ""}
+    </div>`;
+
+  openSheet(`
+    <h3>批量记一笔</h3>
+    <div class="sub">给一组人和<b class="blurable">${esc(t ? t.name : "?")}</b>
+      同时建立同一种关系。适合"我所有朋友都见过他"这种一句话对应很多条的情况。</div>
+
+    <label>选人(已选 ${B.picked.size})</label>
+    <div class="hstack wrap">
+      ${chip("data-quick", "friends", "我的朋友", false)}
+      ${chip("data-quick", "all", "全选", false)}
+      ${chip("data-quick", "none", "清空", false)}
+    </div>
+    <input class="input" id="bulkQ" placeholder="搜索姓名 / 部门"
+           value="${esc(B.q)}" autocomplete="off" style="margin-top:var(--sp-2)">
+    <div class="list pick-list" style="max-height:220px;overflow:auto;
+         overscroll-behavior:contain;margin-top:var(--sp-2)">${rows}</div>
+
+    <label>关系类型</label>
+    <div class="hstack wrap">${st.categories.map(c =>
+      chip("data-bcat", c, `${esc(st.category_glyph[c] || "")} ${esc(c)}`,
+           c === B.cat)).join("")}</div>
+    <div class="hstack wrap" style="margin-top:var(--sp-1)">${kinds.map(k =>
+      chip("data-bkind", k, esc(k), k === B.kind)).join("")}</div>
+
+    <label>强度 ${B.strength > 0 ? "+" : ""}${B.strength}
+      ${esc(STRENGTH_LABEL[B.strength] || "")}</label>
+    <input type="range" id="bulkStr" min="-3" max="3" step="1" value="${B.strength}">
+
+    ${pvHtml}
+
+    <div class="btn-row">
+      ${pv ? `<button class="btn primary" onclick="bulkSave()">
+                确认写入 ${pv.create.length + pv.update.length} 条</button>`
+            : `<button class="btn primary" onclick="bulkPreview()">预览</button>`}
+      <button class="btn" onclick="closeSheets()">放弃</button>
+    </div>`);
+
+  const box = $("#sheetBody");
+  box.querySelectorAll("[data-quick]").forEach(b =>
+    b.onclick = () => bulkQuick(b.dataset.quick));
+  box.querySelectorAll("[data-bcat]").forEach(b =>
+    b.onclick = () => { B.cat = b.dataset.bcat; B.preview = null; renderBulkForm(); });
+  box.querySelectorAll("[data-bkind]").forEach(b =>
+    b.onclick = () => {
+      B.kind = b.dataset.bkind;
+      B.strength = S.state.kinds[B.kind].default;   // 换类型就用该类型的默认强度
+      B.preview = null;
+      renderBulkForm();
+    });
+  box.querySelectorAll(".bpick").forEach(c =>
+    c.onchange = () => {
+      const id = +c.dataset.id;
+      if (c.checked) B.picked.add(id); else B.picked.delete(id);
+      B.preview = null;                 // 名单变了,旧预览作废
+      $("#sheetBody").querySelector("label").textContent =
+        `选人(已选 ${B.picked.size})`;
+    });
+  const qi = $("#bulkQ");
+  if (qi) qi.oninput = () => {
+    B.q = qi.value;
+    const at = qi.selectionStart;
+    renderBulkForm();
+    const n = $("#bulkQ"); n.focus(); n.setSelectionRange(at, at);
+  };
+  const sr = $("#bulkStr");
+  if (sr) sr.oninput = () => {
+    B.strength = +sr.value; B.preview = null; renderBulkForm();
+  };
+}
+
 /* ---------------- 人物卡片(四个分析折叠在这里) ---------------- */
 
 async function showPerson(pid) {
@@ -671,6 +895,7 @@ async function showPerson(pid) {
         <div class="hstack">
           <div class="sec grow">这个圈子里的关系</div>
           <button class="btn mini" onclick="openRelForm({a:${pid}})">＋ 加一条</button>
+          <button class="btn mini" onclick="openBulkForm(${pid})">批量</button>
         </div>
         <div class="list">${rels}</div>
       </div>
@@ -1537,8 +1762,12 @@ function showReview(d) {
   const LOW_CONF = 0.75;
 
   function relRow(r, i) {
-    const weak = !r.evidence || r.confidence < LOW_CONF;
-    const why = !r.evidence ? "模型没给出处"
+    // evidence_ok === false 是最该警惕的一种:出处本身是编的。
+    // 用户判断该不该勾,靠的就是扫一眼出处 —— 出处能编,这个判断就没了依据。
+    const faked = r.evidence_ok === false;
+    const weak = faked || !r.evidence || r.confidence < LOW_CONF;
+    const why = faked ? "出处在原文里找不到,可能是模型编的"
+      : !r.evidence ? "模型没给出处"
       : r.confidence < LOW_CONF ? "把握不足" : "";
     return `
     <div class="card revrel" data-i="${i}">

@@ -73,7 +73,12 @@ RELATION_KINDS = {
     "宿怨":     {"cat": "社交", "sign": -1, "directed": 0, "default": -3},
     # ---- 学缘 ----
     "同学":     {"cat": "学缘", "sign": 0,  "directed": 0, "default": 1},
-    "室友":     {"cat": "学缘", "sign": 1,  "directed": 0, "default": 2},
+    # 事实型关系:有没有这层身份,和亲不亲近是两回事。
+    # 室友原本是 sign=+1/default=+2,和同学/同事/上下级(都是 sign=0)不一致。
+    # 而室友的亲疏是**两极分布**的 —— 从最好的朋友到被逼得退租都有。
+    # 真实案例:用户录「X 鸡毛蒜皮的事都要管,最后 Luna 退租了」,
+    # 界面上却显示「室友 +2 关系不错」。亲疏交给情感型关系去表达。
+    "室友":     {"cat": "学缘", "sign": 0,  "directed": 0, "default": 1},
     "师生":     {"cat": "学缘", "sign": 1,  "directed": 1, "default": 1},
     # ---- 亲缘 ----
     "家人":     {"cat": "亲缘", "sign": 1,  "directed": 0, "default": 3},

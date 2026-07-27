@@ -566,6 +566,52 @@ def main():
     check("至少存在一个 -1 的负向选项供模型落脚", len(light) >= 1,
           f"实际 {light}")
 
+    print("\n事实型关系不该自带亲疏")
+    FACT = ("室友", "同学", "同事", "上下级")
+    signs = {k: db.RELATION_KINDS[k]["sign"] for k in FACT}
+    # 「有没有这层身份」和「亲不亲近」是两回事。室友原本是 sign=+1/default=+2,
+    # 导致真实案例里"被逼得退租"的两个人被显示成「室友 +2 关系不错」。
+    check("事实型关系的 sign 全部一致(都是 0)",
+          set(signs.values()) == {0}, f"实际 {signs}")
+    check("室友默认强度是 +1(不是 +2「关系不错」)",
+          db.RELATION_KINDS["室友"]["default"] == 1,
+          f"实际 {db.RELATION_KINDS['室友']['default']}")
+    # 用户那个例子:室友 +1 + 有摩擦 -2 应当合成负向,且触发混合边
+    rmc = db.create_circle("_室友强度", "自定义")
+    for nm in ("鲁娜测", "艾克斯测"):
+        db.upsert_person(nm, circle_id=rmc)
+    ri = {p["name"]: p["id"] for p in db.list_people(rmc)}
+    db.upsert_relation(rmc, ri["鲁娜测"], ri["艾克斯测"], "室友",
+                       db.RELATION_KINDS["室友"]["default"])
+    db.upsert_relation(rmc, ri["鲁娜测"], ri["艾克斯测"], "有摩擦", -2)
+    gm = analysis.build_graph(rmc)
+    kk = (min(ri.values()), max(ri.values()))
+    check("「是室友但闹得很僵」合并后是负向", gm["pair_w"][kk] < 0,
+          f"实际 {gm['pair_w'][kk]}")
+    check("而且触发混合边(正负分量都非零)", kk in gm["mixed"])
+    db.delete_circle(rmc)
+    for nm in ("鲁娜测", "艾克斯测"):
+        db.delete_person(db.find_person_by_name(nm)["id"])
+
+    print("\n出处必须能在原文里找到")
+    import llm as _llm
+    SRC = "Luna有个室友叫X,X很多事,鸡毛蒜皮的事情都要管,最后Luna退租了。"
+    check("原样摘录能过", _llm.evidence_in_source("鸡毛蒜皮的事情都要管", SRC))
+    check("只差空白/标点不算改写",
+          _llm.evidence_in_source(" 鸡毛蒜皮的事情都要管 ", SRC))
+    check("中英文标点差异不算改写",
+          _llm.evidence_in_source("Luna有个室友叫X,X很多事", SRC))
+    # 这一条来自真实事故:模型把「与luna的关系并不好」当原文摘录写进了出处,
+    # 而用户输入里根本没有这句
+    check("★ 编造的出处会被抓住",
+          not _llm.evidence_in_source(
+              "与luna的关系并不好,鸡毛蒜皮的事情都要管", SRC))
+    check("整句改写会被抓住",
+          not _llm.evidence_in_source("X是个很难相处的人", SRC))
+    check("空出处不算通过", not _llm.evidence_in_source("", SRC))
+    check("材料里有图片时一律放行(出处来自读图,本就不在文本里)",
+          _llm.evidence_in_source("图上读到的话", SRC, has_images=True))
+
     print("\n传递推导(代码算,不交给模型)")
     rc = db.create_circle("_推导测试", "自定义")
     for nm in ("甲宿", "乙宿", "丙宿"):
