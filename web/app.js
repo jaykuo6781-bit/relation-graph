@@ -2119,8 +2119,9 @@ async function sendIngest() {
     return showIngestUnconfigured();
   }
   /* 第一次发送前把"内容会离开这台电脑"讲清楚(设置页的警告没人会翻到)。
-     确认过一次就记住,之后不再拦 —— 这是告知,不是每次都要跨的门槛。 */
-  if (!localStorage.getItem("aiSendOk")) return showFirstSendConfirm();
+     确认过一次就记住,之后不再拦 —— 这是告知,不是每次都要跨的门槛。
+     key 是 v2:v10 起默认还会外发关系网,声明变了就要重新弹一次。 */
+  if (!localStorage.getItem("aiSendOk2")) return showFirstSendConfirm();
   busy(true, "AI 正在读…");
   try {
     const d = await api("/api/ingest", {
@@ -2135,19 +2136,26 @@ async function sendIngest() {
 }
 
 function showFirstSendConfirm() {
+  // 文案按真实行为分支:开着关系外发就说"会发关系",关着就不说 ——
+  // 两个方向都不许撒谎(server 的 /api/state 带 llm_send_relations)
+  const withRel = S.state.llm_send_relations
+    ? `,和<b>已记录的关系</b>(谁和谁什么关系、多亲近 ——
+       AI 靠它把「我所有朋友」这类话展开成名单)`
+    : "";
   openSheet(`
     <h3>发送前要知道的一件事</h3>
     <div class="warnbox">用 AI 录入时,你输入的文字、上传的截图和文档,
-      <b>以及当前圈子里全部人的姓名和部门</b>(为了让模型认出已有的人),
+      <b>以及当前圈子里全部人的姓名、部门</b>${withRel},
       都会发送给模型服务商(默认 OpenAI)。</div>
     <div class="hint">不想外发就用 ＋ 里的手动录入 —— 那条路全程只走本机。
       这个提示只出现这一次。</div>
     <div class="btn-row">
-      <button class="btn primary" id="aiSendOk">知道了,发送</button>
+      <button class="btn primary" id="aiSendGo">知道了,发送</button>
       <button class="btn" onclick="closeSheets()">先不发</button>
     </div>`, "发送确认");
-  $("#aiSendOk").onclick = () => {
-    localStorage.setItem("aiSendOk", "1");
+  $("#aiSendGo").onclick = () => {
+    localStorage.setItem("aiSendOk2", "1");
+    localStorage.removeItem("aiSendOk");   // 旧版声明的记号作废
     // 卡片留着不关:busy 会盖在它上面,抽取结果直接替换这张卡的内容
     sendIngest();
   };
@@ -2213,19 +2221,37 @@ function showReview(d) {
      只要用户一路点「确认入库」就进库了,而且事后很难发现。 */
   const LOW_CONF = 0.75;
 
+  // 强度带符号的小助手(覆盖预警文案里到处要用)
+  const fs = v => (v > 0 ? "+" : "") + v;
+
   function relRow(r, i) {
     // evidence_ok === false 是最该警惕的一种:出处本身是编的。
     // 用户判断该不该勾,靠的就是扫一眼出处 —— 出处能编,这个判断就没了依据。
     const faked = r.evidence_ok === false;
     const weak = faked || !r.evidence || r.confidence < LOW_CONF;
-    const why = faked ? "出处在原文里找不到,可能是模型编的"
+    /* 群体展开行的两条附加闸(后端 _align 标的字段):
+       ghost —— 展开出的名字库里没有、原文里也找不到,大概率是模型编的;
+       dup   —— 这一对同类型关系库里已经有了(upsert 会静默覆盖强度)。
+       两种都默认不勾。普通行 existing_strength 存在时只提示不改勾选 ——
+       它是"原文明说的更新",和展开出来的批量覆盖不是一回事。 */
+    const ghost = r.expand_ghost === true;
+    const dup = !!r.expanded_from && r.existing_strength != null;
+    const noCheck = weak || ghost || dup;
+    const why = ghost ? "展开出的名单里有原文和库里都找不到的人,可能是模型编的"
+      : dup ? (r.existing_strength === r.strength
+          ? "这条库里已经有了,不勾就保持原样"
+          : `这条库里已有(${fs(r.existing_strength)}),勾了入库会改成 ${fs(r.strength)}`)
+      : faked ? "出处在原文里找不到,可能是模型编的"
       : !r.evidence ? "模型没给出处"
       : r.confidence < LOW_CONF ? "把握不足" : "";
+    const overwrite = !r.expanded_from && r.existing_strength != null &&
+      r.existing_strength !== r.strength
+      ? ` · 已有 ${fs(r.existing_strength)},入库会改成 ${fs(r.strength)}` : "";
     return `
     <div class="card revrel" data-i="${i}">
       <div class="hstack top">
         <label class="chkwrap"><input type="checkbox" class="rchk" data-i="${i}"
-               ${weak ? "" : "checked"}></label>
+               ${noCheck ? "" : "checked"}></label>
         <div class="grow">
           <div class="blurable"><b>${esc(r.a_name)}</b>
             <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
@@ -2238,8 +2264,10 @@ function showReview(d) {
 
           ${r.evidence ? `<div class="evidence blurable">${esc(r.evidence)}</div>` : ""}
           <div class="meta dimtext">把握 ${Math.round(r.confidence * 100)}%
-            ${!r.a_id || !r.b_id ? " · 含新人物" : ""}
-            ${why ? ` · <b>${why},已默认不勾</b>` : ""}</div>
+            ${r.expanded_from ? ` · <span class="blurable">展开自「${
+              esc(r.expanded_from)}」</span>` : ""}
+            ${!r.a_id || !r.b_id ? " · 含新人物" : ""}${overwrite}
+            ${why ? ` · <b>${why}${noCheck ? ",已默认不勾" : ""}</b>` : ""}</div>
         </div>
       </div>
     </div>`;
@@ -2267,12 +2295,16 @@ function showReview(d) {
     </div>`;
   }
 
-  // 分两段渲染,但 data-i 一律用**原数组下标** —— 提交时按下标回填,
-  // 用分段后的序号会张冠李戴
+  // 分段渲染,但 data-i 一律用**原数组下标** —— 提交时按下标回填,
+  // 用分段后的序号会张冠李戴。三段:原文抽取 / 群体说法展开 / 传递推导。
   const idx = d.relations.map((r, i) => i);
-  const said = idx.filter(i => !d.relations[i].derived);
+  const said = idx.filter(i => !d.relations[i].derived && !d.relations[i].expanded_from);
+  const expanded = idx.filter(i => d.relations[i].expanded_from && !d.relations[i].derived);
   const guessed = idx.filter(i => d.relations[i].derived);
   const rRows = said.map(i => relRow(d.relations[i], i)).join("");
+  // 展开行复用 relRow:它们有 evidence(那句群体说法的原文)和 confidence,
+  // 与抽取行同构;ghost/dup 的默认不勾逻辑也在 relRow 里
+  const eRows = expanded.map(i => relRow(d.relations[i], i)).join("");
   const gRows = guessed.map(i => derivedRow(d.relations[i], i)).join("");
 
   openSheet(`
@@ -2281,11 +2313,20 @@ function showReview(d) {
     <div class="sub">用的是 ${esc(d.model)}。<b>每条都附了原文摘录</b>,
       扫一眼就知道它有没有编。确认无误的才会入库到「${bn(S.circle.name)}」。</div>
 
+    ${(d.notices || []).length ? `<div class="warnbox">${
+        d.notices.map(esc).join("<br>")}</div>` : ""}
+
     <div class="sec">人物(${people.length})</div>
     <div class="list">${pRows || '<div class="dimtext">没有新人物</div>'}</div>
 
     <div class="sec">从材料里读到的(${said.length})</div>
     ${rRows || '<div class="dimtext">没抽到关系 —— 换个说法再试,或手动录入</div>'}
+
+    ${eRows ? `<div class="sec">由群体说法展开的(${expanded.length})</div>
+      <div class="hint">原话说的是一群人(比如「我所有朋友」),名单是 AI 按
+        已记录的关系网圈出来的 —— <b>可能不全,也可能多圈了人</b>,
+        逐个看一眼再勾。库里已有的、名字对不上的,默认没勾。</div>
+      ${eRows}` : ""}
 
     ${gRows ? `<div class="sec">由已有关系推出来的(${guessed.length})</div>
       <div class="hint">这几条<b>不是原文说的</b>,是根据库里已有的关系推出来的
@@ -2931,9 +2972,14 @@ function renderSettings() {
     </div>
     <div class="warnbox" style="margin-top:10px">
       <b>但用 AI 录入时,内容会离开这台电脑。</b><br>
-      你输入的文字、上传的截图和文档,<b>以及当前圈子里全部人的姓名和部门</b>
-      (为了让模型不把「张伟」认成新人,名单会随每次请求一起发出),
-      都会发送给模型服务商。默认是 OpenAI。<br>
+      你输入的文字、上传的截图和文档,<b>以及当前圈子里全部人的姓名、部门${
+        st.llm_send_relations ? ",和已记录的关系" : ""}</b>
+      (名单让模型认出已有的人${st.llm_send_relations
+        ? ";关系网让它能把「我所有朋友」这类话展开成具体名单" : ""}),
+      都会发送给模型服务商。默认是 OpenAI。<br>${st.llm_send_relations ? `
+      在 <span class="mono">.env</span> 里加
+      <span class="mono">RELGRAPH_LLM_SEND_RELATIONS=0</span> 可以不发关系数据,
+      代价是群体说法没法自动展开。<br>` : ""}
       不想外发就别用底部那个输入栏 —— 手工录入和批量导入全程只走本机。
       也可以把 <span class="mono">OPENAI_BASE_URL</span> 指向本地模型,
       这样连接口调用都不出这台机器。

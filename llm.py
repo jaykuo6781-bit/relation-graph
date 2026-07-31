@@ -9,6 +9,11 @@
 
 一个显著提升小模型准确率的做法:**把当前圈子已有的人员名单一并给模型**,
 让它优先匹配已有的人,而不是凭空造出重复节点。
+
+默认还会把当前圈子**已记录的关系网**一并发给模型(_relations_block)——
+「我所有朋友都认识她」这类群体说法的名单只存在于关系网里,不发的话模型
+只能瞎猜或丢弃。这意味着关系数据会外发给模型服务商;
+在 .env 里设 RELGRAPH_LLM_SEND_RELATIONS=0 可关闭(群体说法将只出提示)。
 """
 
 import base64
@@ -26,6 +31,11 @@ TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".yaml", ".yml
 
 MAX_TEXT_CHARS = 20000       # 单份文档送进模型的上限,避免账单失控
 
+# 「我的朋友」的定义 —— 与前端 bulkQuick 的 AFFECT 集合一致:
+# 只看这几种亲近关系的 kind,不看强度(同事 +1 也是正的,但"我所有朋友"
+# 显然不该把只是同事的人算进去)。群体展开的名单按它圈。
+AFFECT_KINDS = ("朋友", "死党", "情侣", "暧昧", "好感", "派系盟友")
+
 
 class LLMError(Exception):
     pass
@@ -35,7 +45,51 @@ class LLMError(Exception):
 #  提示词
 # ============================================================
 
-def _system_prompt(roster):
+def _relations_block(circle_id, cap=400):
+    """把当前圈子已记录的关系压缩成给模型看的文本块。
+
+    这是「群体说法展开」的原料:「我所有朋友都认识 Joan」里的"所有朋友"
+    到底指谁,只有这张关系网知道 —— 不发的话模型只能瞎猜或者丢弃。
+    cap 做成参数是为了 selftest 用小值测截断,不必真造几百条。
+    """
+    me = db.get_me()
+    people = db.list_people(circle_id)
+    me_in = bool(me) and any(p["id"] == me["id"] for p in people)
+    if me_in:
+        head = (f"「我」就是名单里的「{me['name']}」。"
+                "材料里出现「我」时,请一律写这个真名,不要输出叫「我」的人。")
+    else:
+        head = ("用户还没标记「我」是谁 ——「我的朋友」这类说法没法确定名单,"
+                "写进 notices 提醒用户,不要硬展开。")
+
+    by_id = {p["id"]: p["name"] for p in people}
+    undirected = {}          # (lo,hi) -> ["朋友+2", "竞争-1", ...]
+    directed_lines = []
+    n = 0
+    for r in db.list_relations(circle_id):
+        a, b = by_id.get(r["a_id"]), by_id.get(r["b_id"])
+        if not a or not b:
+            continue
+        n += 1
+        s = r["strength"]
+        tag = f"{r['kind']}{'+' if s > 0 else ''}{s}"
+        if r["directed"]:
+            directed_lines.append(f"{a}→{b}:{tag}")
+        else:
+            undirected.setdefault((min(a, b), max(a, b)), []).append(tag)
+
+    lines = [f"{a}—{b}:{'、'.join(tags)}"
+             for (a, b), tags in sorted(undirected.items())]
+    lines += sorted(directed_lines)
+    cut = ""
+    if len(lines) > cap:
+        lines = lines[:cap]
+        cut = f"\n(关系太多,只列出了前 {cap} 条)"
+    body = "\n".join(lines) if lines else "(这个圈子还没记录任何关系)"
+    return f"{head}\n{body}{cut}"
+
+
+def _system_prompt(roster, relations_block=None):
     kinds_by_cat = {}
     for k, v in db.RELATION_KINDS.items():
         kinds_by_cat.setdefault(v["cat"], []).append(k)
@@ -51,6 +105,46 @@ def _system_prompt(roster):
             f"\n\n【这个圈子里已有的人】\n{listed}\n"
             "遇到这些人时,**必须使用上面列出的完全相同的姓名**,不要写成别名或简称,"
             "否则会造出重复的人。名单里没有的人才算新人。")
+
+    # 群体说法:「我所有朋友」「我们部门的人」「大家都认识X」。
+    # relations_block 给了(默认开)→ 指导模型按关系网展开;
+    # 没给(RELGRAPH_LLM_SEND_RELATIONS=0)→ 明令不要展开,写进 notices。
+    if relations_block is not None:
+        group_block = """
+
+【群体说法】(必须执行)
+材料里出现「我所有朋友」「我们部门的人」「大家都认识X」这类指向**一群人**的说法时,
+把它记进 group_claims —— **具体名单由程序按关系网确定,你不用也不要列名单**:
+- phrase:群体短语的原文(如「我认识的所有朋友」)。
+- group:三选一。「我的朋友」= 短语说的是我的朋友/好友/兄弟们这类亲近的人;
+  「我们部门」= 短语按部门/班级圈人(我们组、我们班都算);其余选「其他」。
+- target:群体说法指向的那个人的姓名(「大家都认识X」里的 X)。
+- kind / strength:这群人与 target 是什么关系 —— 泛泛的「认识」「都认识」
+  「都见过」「共有」用「点头之交」强度 0,除非材料明说是朋友。
+- evidence:材料里说这句话的那个原句。
+两条边界(容易搞错,请逐字执行):
+- 只有**点名一群人**的说法(我所有朋友、我们部门的人、大家)才进 group_claims;
+  「她和某乙比较亲近」这种**两个人之间**的关系,**绝不进 group_claims**,
+  照常写进 relations —— 它一进 group_claims 就丢了。句子用代词(她/他)指代
+  前文某个人时,先把代词还原成那个人,它仍是两个人之间的关系。
+  「亲近」「走得近」「关系好」说的是**朋友**(强度 +2 上下),不是点头之交。
+- group_claims 是额外的补充,不能取代普通抽取:同一段材料里,群体说法记进
+  group_claims,**其余明说的关系照常在 relations 里逐条输出,一条都不能少**。
+例:「某丁是我所有朋友都认识的,她和某乙走得近」→ 两个输出**都要**:
+group_claims 记 {phrase:「我所有朋友」, group:「我的朋友」, target:「某丁」,
+kind:「点头之交」};relations 里照常输出 某丁—某乙:朋友。
+
+relations 里的 expanded_from 一律填空字符串(展开由程序完成);
+没有群体说法就给空的 group_claims;没有要说明的事,notices 给空数组。"""
+        rel_text = f"\n\n【这个圈子里已记录的关系】\n{relations_block}"
+    else:
+        group_block = """
+
+【群体说法】
+材料里出现「我所有朋友」「我们部门的人」这类指向一群人的说法时,**不要**展开成
+具体的人 —— 你看不到已记录的关系,展开只能靠编。把这句话的意思用一句人话写进
+notices 提醒用户手动处理。group_claims 给空数组,expanded_from 一律填空字符串。"""
+        rel_text = ""
 
     return f"""你是一个人际关系信息抽取助手。用户会给你一段中文材料\
 (可能是一段描述、一张聊天截图、或一份文档),里面涉及若干人之间的关系。
@@ -93,9 +187,11 @@ strength 就是这份情感本身的强度,按前面那张对照表给。
 
 严格要求:
 - evidence 字段必须是材料里的**原句摘录**,不得改写、不得编造。\
-如果是截图,就摘录你在图上读到的原话。找不到直接支撑的原文,就不要输出这条关系。
+如果是截图,就摘录你在图上读到的原话。找不到直接支撑的原文,就不要输出这条关系。\
+(群体说法展开出的关系,evidence 就填那句群体说法的原句 —— 它就是原文。)
 - confidence 是你对这条判断的把握程度,0 到 1 之间。明说的用高值,需要推测的用低值。
-- 只抽取材料里真实提到的内容,不要根据常识补充推断。
+- 只抽取材料里真实提到的内容,不要根据常识补充推断。\
+**唯一的例外是【群体说法】的展开(见下)—— 那不是推断,是查表,必须做。**
 - 有方向的关系(师徒、提携、上下级、单恋、好感、金钱借贷、师生):\
 a 是师傅/提携者/上级/暗恋者/出借方。
 
@@ -109,7 +205,8 @@ a 是师傅/提携者/上级/暗恋者/出借方。
 - "竞争""利益冲突"要材料里真的提到了竞争或利益上的冲突,\
 不能因为两人都在同一个部门就推断。
 - 拿不准的宁可不输出这条关系。少抽一条用户可以自己补,\
-抽错一条会污染整张关系图,而且用户往往发现不了 —— 它看起来像一条正常的关系。{roster_block}"""
+抽错一条会污染整张关系图,而且用户往往发现不了 —— 它看起来像一条正常的关系。\
+{group_block}{roster_block}{rel_text}"""
 
 
 def _schema():
@@ -140,14 +237,52 @@ def _schema():
                         "strength": {"type": "integer", "description": "-3 到 3"},
                         "evidence": {"type": "string", "description": "支撑这条判断的原文摘录"},
                         "confidence": {"type": "number", "description": "0 到 1"},
+                        # strict 模式没有"可选字段",空串是既有的哨兵写法(见 dept/title)
+                        "expanded_from": {
+                            "type": "string",
+                            "description": "从哪个群体短语(如「我所有朋友」)展开而来,"
+                                           "普通关系填空字符串"},
                     },
                     "required": ["a", "b", "kind", "strength", "evidence",
-                                 "confidence"],
+                                 "confidence", "expanded_from"],
                     "additionalProperties": False,
                 },
             },
+            # 群体说法只**标记**,不展开 —— 名单枚举是查表活,实测小模型
+            # 做不可靠(会漏人、会把"我的朋友"当成"我"),交给代码做
+            "group_claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "phrase": {"type": "string",
+                                   "description": "群体短语的原文"},
+                        "group": {"type": "string",
+                                  "enum": ["我的朋友", "我们部门", "其他"]},
+                        "target": {"type": "string",
+                                   "description": "群体说法指向的那个人的姓名"},
+                        "kind": {"type": "string",
+                                 "enum": list(db.RELATION_KINDS)},
+                        "strength": {"type": "integer",
+                                     "description": "-3 到 3"},
+                        "evidence": {"type": "string",
+                                     "description": "材料里说这句话的原句"},
+                        "confidence": {"type": "number",
+                                       "description": "0 到 1"},
+                    },
+                    "required": ["phrase", "group", "target", "kind",
+                                 "strength", "evidence", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "notices": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "仅用于「群体说法无法展开」之类必须告诉用户的说明,"
+                               "没有就给空数组",
+            },
         },
-        "required": ["persons", "relations"],
+        "required": ["persons", "relations", "group_claims", "notices"],
         "additionalProperties": False,
     }
 
@@ -310,7 +445,10 @@ def ingest(text="", files=None, circle_id=None):
         resp = client.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[
-                {"role": "system", "content": _system_prompt(roster)},
+                {"role": "system", "content": _system_prompt(
+                    roster,
+                    _relations_block(circle_id)
+                    if config.LLM_SEND_RELATIONS else None)},
                 {"role": "user", "content": parts},
             ],
             response_format={
@@ -424,7 +562,16 @@ def _align(raw, source_text, circle_id, n_images=0):
             "accepted": True,
         })
 
+    # 本圈已有的 (a,b,kind) → strength,给每条候选标「会不会覆盖已有关系」。
+    # upsert 的键就是这三元组,同 kind 直接 UPDATE —— 群体展开一次几十条,
+    # 不标出来的话会悄悄覆盖用户手工调过的强度。
+    existing = {}
+    for er in db.list_relations(circle_id):
+        existing[(er["a_id"], er["b_id"], er["kind"])] = er["strength"]
+
+    norm_src = _norm_quote(source_text)
     relation_rows = []
+    seen_pairs = set()      # 同一批里的镜像重复(a、b 调换再来一遍)只留第一条
     for r in raw.get("relations", []):
         a_name = (r.get("a") or "").strip()
         b_name = (r.get("b") or "").strip()
@@ -433,6 +580,14 @@ def _align(raw, source_text, circle_id, n_images=0):
             continue
         if a_name == b_name:
             continue
+        # 无向关系按名字归一去重;有向的方向本身有语义,原样为键。
+        # 小模型做群体展开时爱把 (Joan,小美) 和 (小美,Joan) 各输出一遍 ——
+        # 不拦的话审核界面会出现两条一模一样的候选,勾了还会重复 upsert
+        pair_key = (kind, a_name, b_name) if kind in db.DIRECTED_KINDS \
+            else (kind,) + tuple(sorted((a_name, b_name)))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
 
         pa, how_a = _match_person(a_name, all_people)
         pb, how_b = _match_person(b_name, all_people)
@@ -443,7 +598,8 @@ def _align(raw, source_text, circle_id, n_images=0):
             strength = info["default"]
         strength = max(-3, min(3, strength))
 
-        relation_rows.append({
+        expanded_from = (r.get("expanded_from") or "").strip()
+        row = {
             "a_name": a_name, "b_name": b_name,
             "a_id": pa["id"] if pa else None,
             "b_id": pb["id"] if pb else None,
@@ -459,18 +615,160 @@ def _align(raw, source_text, circle_id, n_images=0):
                 r.get("evidence", ""), source_text, n_images > 0),
             "confidence": round(float(r.get("confidence", 0) or 0), 2),
             "accepted": True,
-        })
+            "expanded_from": expanded_from,
+        }
+
+        if expanded_from:
+            # 幽灵判定:展开出的名字既不在库里、原文里也找不到 → 大概率是编的。
+            # ⚠ 只看"没 matched"不行 —— 「Joan是我所有朋友里的共有」里的 Joan
+            # 正是本次材料新引入的人:库里没有,但原文里明明白白写着,不算幽灵。
+            # 有图片时跳过(名字来自读图,与 evidence 的放行逻辑一致)。
+            def _unknown(nm, pid):
+                return pid is None and _norm_quote(nm) not in norm_src
+            ghost = n_images == 0 and (
+                _unknown(a_name, row["a_id"]) or _unknown(b_name, row["b_id"]))
+            if ghost:
+                row["expand_ghost"] = True
+                row["accepted"] = False
+
+        # 覆盖预警:两端都对上了库里的人时,查这一对同 kind 是否已存在。
+        # 键要过 normalize_pair —— 无向对按 a<b 归一,有向的方向敏感,
+        # 不归一会漏报/误报。derived 行没有 id,天然不标。
+        if row["a_id"] and row["b_id"]:
+            na, nb, _d = db.normalize_pair(row["a_id"], row["b_id"], kind)
+            if (na, nb, kind) in existing:
+                row["existing_strength"] = existing[(na, nb, kind)]
+
+        relation_rows.append(row)
+
+    # ---- 群体说法展开:模型标记(group_claims),代码枚举名单 ----
+    #
+    # 分工是实测出来的:gpt-4o-mini 能可靠地识别"这句话说的是一群人"、
+    # 指认对象、选关系类型,但**照关系网枚举名单做不可靠** —— 三轮提示词
+    # 加强后仍会漏掉死党、把"我的朋友"当成"我"、同一对正反输出两遍。
+    # 枚举是查表活,代码做:一个不漏、绝不圈错、天然去重。
+    extra_notices = []
+    me = db.get_me()
+    circle_people = db.list_people(circle_id)
+    me_in = bool(me) and any(p["id"] == me["id"] for p in circle_people)
+    name_of = {p["id"]: p["name"] for p in circle_people}
+
+    for gcm in raw.get("group_claims", []):
+        phrase = (gcm.get("phrase") or "").strip()
+        target_name = (gcm.get("target") or "").strip()
+        gtype = (gcm.get("group") or "其他").strip()
+        kind = db.normalize_kind(gcm.get("kind") or "点头之交")
+        if kind not in db.RELATION_KINDS:
+            kind = "点头之交"
+        info = db.RELATION_KINDS[kind]
+        try:
+            strength = max(-3, min(3, int(gcm.get("strength", info["default"]))))
+        except (TypeError, ValueError):
+            strength = info["default"]
+        evidence = gcm.get("evidence", "")
+        try:
+            conf = round(float(gcm.get("confidence", 0) or 0), 2)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if not phrase or not target_name:
+            continue
+        if not me_in:
+            extra_notices.append(
+                f"材料里的「{phrase}」指一群人,但还没在这个圈子里标记"
+                f"「我」是谁,没法确定名单 —— 去设置页指定后重发,"
+                f"或用人物卡的「批量」手工勾选。")
+            continue
+
+        # 名单:确定性地从库里圈
+        if gtype == "我的朋友":
+            members = set()
+            for er in db.list_relations(circle_id):
+                if er["kind"] not in AFFECT_KINDS:
+                    continue
+                if er["a_id"] == me["id"]:
+                    members.add(er["b_id"])
+                elif er["b_id"] == me["id"]:
+                    members.add(er["a_id"])
+        elif gtype == "我们部门":
+            dept = (me.get("dept") or "").strip()
+            if not dept:
+                extra_notices.append(
+                    f"「{phrase}」按部门圈人,但「我」({me['name']})"
+                    f"还没填部门,没法确定名单。")
+                continue
+            members = {p["id"] for p in circle_people
+                       if (p.get("dept") or "").strip() == dept
+                       and p["id"] != me["id"]}
+        else:
+            extra_notices.append(
+                f"材料里的「{phrase}」指一群人,但没法确定具体是谁 —— "
+                f"可以用人物卡的「批量」手工勾选名单。")
+            continue
+
+        if not members:
+            extra_notices.append(
+                f"「{phrase}」按关系网找不到对应的人(还没记录这类关系),"
+                f"没有展开。")
+            continue
+
+        # 对象可能是本次材料新引入的人(库里没有)—— 不算幽灵,
+        # 除非原文里也找不到这个名字(那就是模型编的)
+        pt, _how_t = _match_person(target_name, all_people)
+        target_id = pt["id"] if pt else None
+        target_ghost = (n_images == 0 and target_id is None
+                        and _norm_quote(target_name) not in norm_src)
+
+        for mid in sorted(members):
+            m_name = name_of.get(mid)
+            if not m_name or mid == target_id or m_name == target_name:
+                continue
+            pair_key = (kind, m_name, target_name) if kind in db.DIRECTED_KINDS \
+                else (kind,) + tuple(sorted((m_name, target_name)))
+            if pair_key in seen_pairs:      # 模型已直接抽过这一条就不重复
+                continue
+            seen_pairs.add(pair_key)
+            row = {
+                "a_name": m_name, "b_name": target_name,
+                "a_id": mid, "b_id": target_id,
+                "a_match": "exact", "b_match": _how_t,
+                "kind": kind,
+                "cat": info["cat"],
+                "glyph": db.CATEGORY_GLYPH.get(info["cat"], ""),
+                "strength": strength,
+                "evidence": evidence,
+                "evidence_ok": evidence_in_source(
+                    evidence, source_text, n_images > 0),
+                "confidence": conf,
+                "accepted": True,
+                "expanded_from": phrase,
+            }
+            if target_ghost:
+                row["expand_ghost"] = True
+                row["accepted"] = False
+            if target_id:
+                na, nb, _d = db.normalize_pair(mid, target_id, kind)
+                if (na, nb, kind) in existing:
+                    row["existing_strength"] = existing[(na, nb, kind)]
+            relation_rows.append(row)
 
     # 传递推导:A-C 和 B-C 都是室友 -> 建议 A-B 也是。
     #
     # **刻意不交给模型做**:这是个确定性的图运算,交给模型会时对时错,
-    # 而且提示词里明写着"不要根据常识补充推断" —— 让它一边守这条一边
-    # 又去推理,只会两头都做不好。代码来做还能给出可复述的依据
-    # ("因为两人都是 Alex 的室友"),顺带也不必把已有关系发给模型服务商。
+    # 代码来做能给出可复述的依据("因为两人都是 Alex 的室友")。
+    # 群体说法同理:模型只负责"读懂这句话"(group_claims),名单由上面的
+    # 代码按关系网枚举 —— 各干各擅长的。
     #
     # 结果和抽取出来的关系放进**同一个数组**,靠 derived 标记区分;
-    # 审核界面分两段渲染,但 data-i 仍用原数组下标。
+    # 审核界面分段渲染,但 data-i 仍用原数组下标。
     derived = analysis.derive_transitive(circle_id, relation_rows)
+
+    # 模型的说明(群体说法无法展开时的原因)+ 代码展开时发现的问题。
+    # 滤空、限长、限条数 —— 别让模型往用户脸上贴大字报。
+    notices = [n.strip()[:200] for n in raw.get("notices", [])
+               if isinstance(n, str) and n.strip()]
+    notices = (notices + extra_notices)[:5]
+    notices = [n[:200] for n in notices]
+
     return {
         "source": source_text[:4000],
         "images": n_images,
@@ -478,6 +776,7 @@ def _align(raw, source_text, circle_id, n_images=0):
         "model": config.LLM_MODEL,
         "persons": person_rows,
         "relations": relation_rows + derived,
+        "notices": notices,
     }
 
 

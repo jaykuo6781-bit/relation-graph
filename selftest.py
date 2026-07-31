@@ -771,6 +771,191 @@ def main():
         if pp:
             db.delete_person(pp["id"])
 
+    # ---------------- 群体说法展开(v10) ----------------
+    print("\n群体说法展开(「我所有朋友」的名单在关系网里,发给模型才展得开)")
+    # set_me 是全局唯一的,测完必须恢复 —— 否则会污染前面按 demo 的「我」
+    # 算好的局势用例(这是 selftest 里最容易踩的坑,写在这里当警示)
+    prev_me = db.get_me()
+    gc = db.create_circle("_群展测试", "自定义")
+    for nm in ("我测甲", "友测乙", "友测丙", "同事丁"):
+        db.upsert_person(nm, circle_id=gc)
+    gid = {p["name"]: p["id"] for p in db.list_people(gc)}
+    db.set_me(gid["我测甲"])
+    db.upsert_relation(gc, gid["我测甲"], gid["友测乙"], "朋友", 2)
+    db.upsert_relation(gc, gid["我测甲"], gid["友测乙"], "竞争", -1)
+    db.upsert_relation(gc, gid["我测甲"], gid["友测丙"], "死党", 3)
+    db.upsert_relation(gc, gid["我测甲"], gid["同事丁"], "同事", 1)
+    db.upsert_relation(gc, gid["我测甲"], gid["友测乙"], "好感", 1)   # 有向
+
+    try:
+        blk = _llm._relations_block(gc)
+        check("「我」行点名真名(防模型造出叫「我」的人)",
+              "「我」就是" in blk and "我测甲" in blk, blk[:120])
+        check("无向关系按对并列成一行(朋友+2、竞争-1)",
+              "朋友+2、竞争-1" in blk, blk)
+        check("有向关系带箭头且方向保持",
+              "我测甲→友测乙:好感+1" in blk, blk)
+        check("cap 截断有说明", "只列出了前 1 条" in _llm._relations_block(gc, cap=1))
+        db.set_me(prev_me["id"])          # 「我」不在这个圈子里的形态
+        check("「我」不在本圈时引导写 notices 而不是硬展开",
+              "notices" in _llm._relations_block(gc))
+        db.set_me(gid["我测甲"])
+
+        AFFECT = ("朋友", "死党", "情侣", "暧昧", "好感", "派系盟友")
+        check("提示词里的「我的朋友」词表与词库一致(词表改名这里会响)",
+              all(k in db.RELATION_KINDS for k in AFFECT))
+        sp = _llm._system_prompt([], blk)
+        check("开启形态:有【群体说法】/expanded_from/点头之交,并带上了关系网",
+              "【群体说法】" in sp and "expanded_from" in sp
+              and "点头之交" in sp and "朋友+2、竞争-1" in sp
+              and all(k in sp for k in AFFECT))
+        sp_off = _llm._system_prompt([], None)
+        check("关闭形态:明令不要展开、走 notices,且没有关系网块",
+              "不要" in sp_off and "notices" in sp_off
+              and "【这个圈子里已记录的关系】" not in sp_off)
+
+        # strict 模式三件套:required 列全、additionalProperties:False。
+        # 少一样 OpenAI 会直接拒绝整个请求,而且报错发生在真调用时
+        def _walk(node):
+            ok = True
+            if isinstance(node, dict):
+                if node.get("type") == "object" and "properties" in node:
+                    ok &= sorted(node.get("required", [])) == \
+                        sorted(node["properties"].keys())
+                    ok &= node.get("additionalProperties") is False
+                for v in node.values():
+                    ok &= _walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    ok &= _walk(v)
+            return ok
+        sc = _llm._schema()
+        check("schema 守住 strict 三件套(递归检查)", _walk(sc))
+        check("relations 行有 expanded_from,顶层有 notices",
+              "expanded_from" in
+              sc["properties"]["relations"]["items"]["properties"]
+              and "notices" in sc["properties"])
+
+        # _align 打桩:不打真 API,直接喂模型形状的 raw
+        src = "Joan是我认识的所有朋友里的共有,她和luna会比较亲近"
+        exp = "我认识的所有朋友"
+        ev = "Joan是我认识的所有朋友里的共有"
+        raw = {"persons": [{"name": "Joan", "dept": "", "title": ""}],
+               "relations": [
+                   {"a": "Joan", "b": "友测乙", "kind": "点头之交", "strength": 0,
+                    "evidence": ev, "confidence": 0.9, "expanded_from": exp},
+                   # 镜像重复:小模型爱把同一对调换 a、b 再输出一遍
+                   {"a": "友测乙", "b": "Joan", "kind": "点头之交", "strength": 0,
+                    "evidence": ev, "confidence": 0.9, "expanded_from": exp},
+                   {"a": "Joan", "b": "幽灵人", "kind": "点头之交", "strength": 0,
+                    "evidence": ev, "confidence": 0.9, "expanded_from": exp},
+                   {"a": "友测乙", "b": "我测甲", "kind": "朋友", "strength": 3,
+                    "evidence": ev, "confidence": 0.9, "expanded_from": exp},
+                   {"a": "友测乙", "b": "我测甲", "kind": "好感", "strength": 1,
+                    "evidence": ev, "confidence": 0.9, "expanded_from": exp},
+                   {"a": "Joan", "b": "luna", "kind": "朋友", "strength": 2,
+                    "evidence": "她和luna会比较亲近", "confidence": 0.9,
+                    "expanded_from": ""},
+               ],
+               # 模型只标记群体说法,名单由代码按关系网枚举
+               "group_claims": [
+                   {"phrase": exp, "group": "我的朋友", "target": "Joan",
+                    "kind": "点头之交", "strength": 0, "evidence": ev,
+                    "confidence": 0.9},
+               ],
+               "notices": ["  ", "提示一", "x" * 300, "n1", "n2", "n3", "n4"]}
+        out = _llm._align(raw, src, gc, 0)
+        rows = {}
+        for r in out["relations"]:
+            if not r.get("derived"):
+                rows[(r["a_name"], r["b_name"], r["kind"])] = r
+
+        r_joan = rows[("Joan", "友测乙", "点头之交")]
+        check("★ Joan 在原文但不在库 → 不算幽灵、默认勾(旗舰用例不被误杀)",
+              not r_joan.get("expand_ghost") and r_joan["accepted"] is True,
+              str(r_joan))
+        r_ghost = rows[("Joan", "幽灵人", "点头之交")]
+        check("原文和库里都没有的名字 → 幽灵,默认不勾",
+              r_ghost.get("expand_ghost") is True
+              and r_ghost["accepted"] is False)
+        r_dup = rows[("友测乙", "我测甲", "朋友")]
+        check("已有同类型关系 → 标出当前强度(覆盖预警的数据源)",
+              r_dup.get("existing_strength") == 2, str(r_dup))
+        r_dir = rows[("友测乙", "我测甲", "好感")]
+        check("有向关系反着给不误报 existing_strength(方向敏感)",
+              "existing_strength" not in r_dir)
+        r_norm = rows[("Joan", "luna", "朋友")]
+        check("普通行 expanded_from 是空串、不背幽灵标记",
+              r_norm["expanded_from"] == "" and "expand_ghost" not in r_norm)
+        check("notices 滤空、截长、限 5 条",
+              len(out["notices"]) == 5 and out["notices"][0] == "提示一"
+              and all(len(n) <= 200 for n in out["notices"]))
+
+        # ---- 代码枚举(group_claims → 展开)----
+        r_dang = rows.get(("友测丙", "Joan", "点头之交"))
+        check("★ 名单由代码枚举:死党也被圈进来(模型漏了也没关系)",
+              r_dang is not None and r_dang["expanded_from"] == exp
+              and r_dang["accepted"] is True
+              and not r_dang.get("expand_ghost"), str(r_dang))
+        check("同事不算「我的朋友」,不被圈进来",
+              ("同事丁", "Joan", "点头之交") not in rows
+              and ("Joan", "同事丁", "点头之交") not in rows)
+        joan_yi = [k for k in rows
+                   if k[2] == "点头之交" and {k[0], k[1]} == {"Joan", "友测乙"}]
+        check("镜像重复(a、b 调换)只留一条,代码展开也不再重复",
+              len(joan_yi) == 1, str(joan_yi))
+
+        out2 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "我们那帮兄弟", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "x",
+                               "confidence": 0.5}],
+             "notices": []}, "随便什么原文", gc, 0)
+        check("圈不出的群体(其他)→ 提示走批量,不硬展开",
+              not [r for r in out2["relations"] if r.get("expanded_from")]
+              and any("批量" in n for n in out2["notices"]))
+
+        db.set_me(prev_me["id"])          # 「我」不在这个圈子里
+        out3 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "我的朋友们", "group": "我的朋友",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "x",
+                               "confidence": 0.5}],
+             "notices": []}, "随便什么原文", gc, 0)
+        check("没在本圈标「我」→ 不硬展开,提示去设置",
+              not [r for r in out3["relations"] if r.get("expanded_from")]
+              and any("我」是谁" in n for n in out3["notices"]))
+        db.set_me(gid["我测甲"])
+
+        # commit:展开行带 id 不造人;幽灵行 accepted=False 不入库
+        n_before = len(db.list_people())
+        res = _llm.commit({"persons": [], "source": "", "relations": [
+            {"a_name": "友测乙", "b_name": "友测丙",
+             "a_id": gid["友测乙"], "b_id": gid["友测丙"],
+             "kind": "点头之交", "strength": 0, "evidence": ev,
+             "confidence": 0.9, "accepted": True, "expanded_from": exp},
+            {"a_name": "幽灵人", "b_name": "友测乙", "kind": "点头之交",
+             "strength": 0, "accepted": False, "expanded_from": exp,
+             "expand_ghost": True},
+        ]}, gc)
+        check("展开行带 id 入库不造人、幽灵行被跳过",
+              res["relations"] == 1 and len(db.list_people()) == n_before
+              and db.find_person_by_name("幽灵人") is None)
+        check("展开行的原句落进了 notes(入库后能看到出处)",
+              any(r["kind"] == "点头之交" and "Joan" in (r["notes"] or "")
+                  for r in db.list_relations(gc)))
+    finally:
+        db.set_me(prev_me["id"])
+        db.delete_circle(gc)
+        for nm in ("我测甲", "友测乙", "友测丙", "同事丁"):
+            pp = db.find_person_by_name(nm)
+            if pp:
+                db.delete_person(pp["id"])
+    check("「我」已恢复(set_me 全局唯一,不恢复会污染后面的用例)",
+          db.get_me() and db.get_me()["id"] == prev_me["id"])
+
     # ---------------- 布局 ----------------
     print("\n布局引擎")
     for name, c in (("公司圈", company), ("同学圈", klass)):

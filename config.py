@@ -146,6 +146,11 @@ except ValueError:
     print(f"⚠ RELGRAPH_LLM_TIMEOUT={os.environ.get('RELGRAPH_LLM_TIMEOUT')!r} "
           f"不是数字,已改用默认 120 秒")
     LLM_TIMEOUT = 120.0
+# AI 摄取时把当前圈子**已记录的关系**一并发给模型 —— 「我所有朋友都认识她」
+# 这类群体说法,名单只存在于你的关系网里,不发的话模型只能瞎猜或者丢弃。
+# 设为 0 则不发(群体说法会变成一条提示,而不是自动展开)。
+LLM_SEND_RELATIONS = (os.environ.get("RELGRAPH_LLM_SEND_RELATIONS") or "1") \
+    .strip().lower() not in ("0", "false", "no", "off")
 
 
 def llm_configured():

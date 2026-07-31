@@ -88,6 +88,9 @@ def api_state(handler, query, body):
         "circle_kinds": db.CIRCLE_KINDS,
         "llm_configured": config.llm_configured(),
         "llm_model": config.LLM_MODEL,
+        # 前端的隐私文案按它分支:开着说"会发关系",关着说"只发名单" ——
+        # 文案必须跟真实行为一致,两个方向都不许撒谎
+        "llm_send_relations": config.LLM_SEND_RELATIONS,
         "graph_version": db.graph_version(),
     }
 

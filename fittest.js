@@ -1825,10 +1825,11 @@ console.log("\n本轮(确定性 bug + 可见反馈 + 界面):要守住的新行�
   check("「删」与相邻按钮拉开间距", /\.btn\.mini\.danger\{margin-left/.test(css));
   check("死代码 .sel-compact 已删", !css.includes(".sel-compact"));
 
-  /* ---- 隐私:首次发送确认 + 空输入禁用 ---- */
+  /* ---- 隐私:首次发送确认 + 空输入禁用 ----
+     key 是 v2:v10 起默认外发关系网,隐私声明变了就要重新确认一次 */
   check("首次 AI 发送有隐私确认(localStorage 记忆,只拦一次)",
         /function showFirstSendConfirm/.test(ajs) &&
-        /localStorage\.getItem\("aiSendOk"\)\) return showFirstSendConfirm/.test(ajs));
+        /localStorage\.getItem\("aiSendOk2"\)\) return showFirstSendConfirm/.test(ajs));
   check("空输入时发送键禁用",
         /function paintSendState[\s\S]{0,220}disabled/.test(ajs));
 
@@ -1860,6 +1861,72 @@ console.log("\n本轮(确定性 bug + 可见反馈 + 界面):要守住的新行�
   check("新建/改名圈子是表单卡(类型 chip 用 circle_kinds,不再三连 prompt)",
         /function openCircleForm/.test(ajs) && /data-ck/.test(ajs) &&
         /data-ci/.test(ajs));
+}
+
+console.log("\n群体说法展开(v10):AI 按关系网展开「我所有朋友」");
+{
+  /* 三分渲染:原文抽取 / 群体展开 / 传递推导。展开行如果不从 said 里
+     滤出去,会被当成普通抽取行,而它的 evidence 是那句群体说法 ——
+     没有任何标识,用户看不出这是"AI 圈出来的名单"。 */
+  check("said 过滤掉了展开行(同时守住原有的 !derived)",
+        /const said = idx\.filter\(i => !d\.relations\[i\]\.derived && !d\.relations\[i\]\.expanded_from\)/.test(ajs));
+  check("expanded 段单独过滤且不含 derived",
+        /const expanded = idx\.filter\(i => d\.relations\[i\]\.expanded_from && !d\.relations\[i\]\.derived\)/.test(ajs));
+  check("展开行复用 relRow(不新增行渲染函数,chkwrap===2 的钉子因此仍成立)",
+        /const eRows = expanded\.map\(i => relRow\(d\.relations\[i\], i\)\)/.test(ajs));
+  check("展开段有标题与诚实提示(名单可能不全/多圈)",
+        /由群体说法展开的/.test(ajs) && /可能不全,也可能多圈了人/.test(ajs));
+  check("展开行在行内标明来源短语",
+        /展开自「\$\{\s*esc\(r\.expanded_from\)\}」/.test(ajs.replace(/\n\s*/g, "")) ||
+        /展开自「/.test(ajs));
+
+  /* 默认不勾的三道闸:幽灵(原文和库里都没有的名字)、重复(库里已有
+     同类型关系,upsert 会静默覆盖强度)、以及原有的 weak。
+     幽灵判定在**后端** _align 做(前端拿不到归一化的全文),前端只读字段。 */
+  check("幽灵行默认不勾且理由上屏",
+        /r\.expand_ghost === true/.test(ajs) &&
+        /原文和库里都找不到的人/.test(ajs));
+  check("重复行默认不勾:同强度说「保持原样」,异强度说会改成多少",
+        /不勾就保持原样/.test(ajs) && /勾了入库会改成/.test(ajs));
+  check("普通行的覆盖预警只提示不改勾选",
+        /入库会改成/.test(ajs) && /existing_strength/.test(ajs));
+  check("notices(无法展开的原因)渲染成 warnbox",
+        /d\.notices/.test(ajs));
+
+  /* 隐私声明必须跟真实行为一致,两个方向都不许撒谎:
+     开着说"会发关系",关着不说;声明变了 key 换代重新确认一次 */
+  check("确认时写入新 key 并清掉旧 key",
+        /setItem\("aiSendOk2"/.test(ajs) && /removeItem\("aiSendOk"\)/.test(ajs));
+  check("旧 key 不再作为放行依据",
+        !/getItem\("aiSendOk"\)/.test(ajs));
+  check("确认卡与设置页的文案都按 llm_send_relations 分支",
+        (ajs.match(/llm_send_relations/g) || []).length >= 3 &&
+        (ajs.match(/已记录的关系/g) || []).length >= 2);
+
+  /* 后端契约(string-pin 到 python 源码):schema 有位置、提示词有指令、
+     幽灵判定不误杀"原文里新出现的人" */
+  const py = fs.readFileSync(path.join(__dirname, "llm.py"), "utf8");
+  check("schema 里有 expanded_from / group_claims / notices",
+        /"expanded_from"/.test(py) && /"group_claims"/.test(py) &&
+        /"notices"/.test(py));
+  check("提示词有【群体说法】段,且明写泛泛的「认识」用点头之交",
+        /【群体说法】/.test(py) && /点头之交/.test(py));
+  /* 分工是实测出来的:模型标记(group_claims),代码枚举名单 ——
+     gpt-4o-mini 自己展开会漏死党、把"我的朋友"当成"我"。
+     谁要是把枚举再交回给模型,这两条会先响。 */
+  check("名单枚举在代码里(AFFECT_KINDS 常量 + group_claims 处理循环)",
+        /AFFECT_KINDS = \("朋友", "死党", "情侣", "暧昧", "好感", "派系盟友"\)/.test(py) &&
+        /raw\.get\("group_claims"/.test(py));
+  check("提示词明确不让模型列名单",
+        /名单由程序按关系网确定/.test(py));
+  check("幽灵判定同时看库和原文(只看库会误杀原文新出现的 Joan)",
+        /_norm_quote\(nm\) not in norm_src/.test(py) ||
+        /_norm_quote\(target_name\) not in norm_src/.test(py));
+  check("同批镜像重复(a、b 调换)被去重",
+        /seen_pairs/.test(py));
+  check("关系网块受 LLM_SEND_RELATIONS 开关控制",
+        /config\.LLM_SEND_RELATIONS/.test(py) &&
+        /_relations_block\(circle_id\)/.test(py));
 }
 
 console.log("\n" + "=".repeat(52));
