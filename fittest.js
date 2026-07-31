@@ -1927,6 +1927,22 @@ console.log("\n群体说法展开(v10):AI 按关系网展开「我所有朋友�
   check("关系网块受 LLM_SEND_RELATIONS 开关控制",
         /config\.LLM_SEND_RELATIONS/.test(py) &&
         /_relations_block\(circle_id\)/.test(py));
+
+  /* v11:确定性兜底 —— 「不静默丢弃」不再依赖模型配合(v10 真机栽过:
+     模型 claim 和 notice 两头全空,系统毫无察觉)。谁删掉模式表或
+     兜底提示,这几条先响。 */
+  check("确定性兜底在(模式表 + 未处理检测 + 人话提示)",
+        /GROUP_HINT_PATTERNS/.test(py) && /_unhandled_group_hints/.test(py) &&
+        /没能自动展开/.test(py));
+  check("模式表带宁漏勿滥的警示注释(防后人随手加宽)",
+        /宁漏勿滥/.test(py));
+  check("提示词补了代词还原与方向无关(实测失败形态)",
+        /X认识我所有朋友/.test(py) && /方向不影响识别/.test(py));
+  check("兜底按 LLM_SEND_RELATIONS 分支话术(关着不劝重发)",
+        /已关闭发送关系网/.test(py));
+  check("「某人的室友/同学/朋友」有确定性 anchor 解析",
+        /endswith\("的" \+ kw\)/.test(py) &&
+        /\("室友", \("室友",\)\), \("同学", \("同学",\)\)/.test(py));
 }
 
 console.log("\n" + "=".repeat(52));

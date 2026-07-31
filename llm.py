@@ -36,6 +36,43 @@ MAX_TEXT_CHARS = 20000       # 单份文档送进模型的上限,避免账单失
 # 显然不该把只是同事的人算进去)。群体展开的名单按它圈。
 AFFECT_KINDS = ("朋友", "死党", "情侣", "暧昧", "好感", "派系盟友")
 
+# 群体说法的保守探测模式:(探测子串, 词干)。子串在归一化后的原文里出现、
+# 而模型既没标 group_claim 也没有展开行/notice 时,兜底提示用户 ——
+# 「不静默丢弃」的保证不能依赖模型配合(v10 就是栽在这:模型两头全空,
+# 系统毫无察觉)。词干用于判断「模型已处理」:claim 短语/展开行/notice
+# 里含同一词干就不再提示。
+# **宁漏勿滥**:误报会让每次录入都弹提示,用户很快学会无视 warnbox,
+# 真警报也跟着失效。所以不收「大家都」「朋友们」这类裸词(「大家都很开心」
+# 是日常叙述);往这张表加条目前,先想清楚哪句正常的话会误命中。
+GROUP_HINT_PATTERNS = (
+    ("所有朋友", "朋友"), ("所有的朋友", "朋友"), ("全部朋友", "朋友"),
+    ("朋友们都", "朋友"), ("朋友都认识", "朋友"),
+    ("室友都", "室友"), ("同学都认识", "同学"), ("同事都认识", "同事"),
+    ("大家都认识", "大家"), ("大家都熟", "大家"),
+    ("部门的人都", "部门"), ("我们部门都", "部门"),
+    ("班的人都", "班"), ("组的人都", "组"), ("宿舍的人都", "宿舍"),
+)
+
+
+def _unhandled_group_hints(norm_src, claims, relation_rows, notices):
+    """确定性兜底:原文像群体说法、但模型两头都空着的模式。返回命中子串。
+
+    纯函数,selftest 直接打桩测。handled 集合把模型 claim 的 phrase/evidence、
+    已生成的展开行、模型自己写的 notices 全拼起来归一化 —— 模型写的短语
+    (「我的朋友们」)和探测子串(「朋友们都」)对不上没关系,词干对上就算已处理。
+    """
+    handled = _norm_quote("".join(
+        [(c.get("phrase") or "") + (c.get("evidence") or "")
+         for c in claims if isinstance(c, dict)]
+        + [r.get("expanded_from") or "" for r in relation_rows]
+        + [n for n in notices if isinstance(n, str)]))
+    hits, seen = [], set()
+    for pat, stem in GROUP_HINT_PATTERNS:
+        if pat in norm_src and stem not in seen and stem not in handled:
+            seen.add(stem)
+            hits.append(pat)
+    return hits[:2]
+
 
 class LLMError(Exception):
     pass
@@ -115,13 +152,19 @@ def _system_prompt(roster, relations_block=None):
 【群体说法】(必须执行)
 材料里出现「我所有朋友」「我们部门的人」「大家都认识X」这类指向**一群人**的说法时,
 把它记进 group_claims —— **具体名单由程序按关系网确定,你不用也不要列名单**:
-- phrase:群体短语的原文(如「我认识的所有朋友」)。
+- phrase:群体短语的原文(如「我认识的所有朋友」);「Alex 的室友们」这类
+  **别人的群体**也算,phrase 必须带上那个人的名字(如「Alex的室友」)。
 - group:三选一。「我的朋友」= 短语说的是我的朋友/好友/兄弟们这类亲近的人;
   「我们部门」= 短语按部门/班级圈人(我们组、我们班都算);其余选「其他」。
-- target:群体说法指向的那个人的姓名(「大家都认识X」里的 X)。
+- target:群体说法指向的那个人的姓名(「大家都认识X」「X认识我所有朋友」
+  里的 X)。target 是代词(她/他)时,先还原成前文说的那个人,写真名。
+- 方向不影响识别:「她认识我所有朋友」和「我所有朋友都认识她」是同一件事,
+  都要记进 group_claims,target 都是「她」指的那个人。
 - kind / strength:这群人与 target 是什么关系 —— 泛泛的「认识」「都认识」
   「都见过」「共有」用「点头之交」强度 0,除非材料明说是朋友。
 - evidence:材料里说这句话的那个原句。
+例:「我和 Alex 的室友都认识」→ {phrase:「Alex的室友」, group:「其他」,
+target:「我」的真名, kind:「点头之交」}。
 两条边界(容易搞错,请逐字执行):
 - 只有**点名一群人**的说法(我所有朋友、我们部门的人、大家)才进 group_claims;
   「她和某乙比较亲近」这种**两个人之间**的关系,**绝不进 group_claims**,
@@ -700,10 +743,44 @@ def _align(raw, source_text, circle_id, n_images=0):
                        if (p.get("dept") or "").strip() == dept
                        and p["id"] != me["id"]}
         else:
-            extra_notices.append(
-                f"材料里的「{phrase}」指一群人,但没法确定具体是谁 —— "
-                f"可以用人物卡的「批量」手工勾选名单。")
-            continue
+            # 「某人的室友/同学/朋友」:phrase 恰好是「<圈内唯一人名>的室友」
+            # 这类形态时,确定性解析出 anchor,照查表展开。
+            # 保守闸:前缀匹配不到唯一的人(「我和alex的室友」的前缀是
+            # "我和alex")→ 不硬展开 —— 这句连人读着都有歧义。
+            members = None
+            npz = _norm_quote(phrase)
+            # 模型给的 phrase 常带尾巴(「Alex的室友都认识」「…的室友们」),
+            # 剥掉这些不影响语义的后缀再匹配 —— 歧义闸(前缀必须是唯一人名)
+            # 不因此放松
+            for suf in ("都认识", "都熟", "都见过", "都", "们"):
+                if npz.endswith(suf):
+                    npz = npz[: -len(suf)]
+            for kw, kinds in (("室友", ("室友",)), ("同学", ("同学",)),
+                              ("朋友", AFFECT_KINDS)):
+                if not npz.endswith("的" + kw):
+                    continue
+                owner = npz[: -len(kw) - 1]
+                if owner in ("我", _norm_quote(me["name"])):
+                    cand = [me]
+                else:
+                    cand = [p for p in circle_people
+                            if _norm_quote(p["name"]) == owner]
+                if len(cand) == 1:
+                    aid = cand[0]["id"]
+                    members = set()
+                    for er in db.list_relations(circle_id):
+                        if er["kind"] not in kinds:
+                            continue
+                        if er["a_id"] == aid:
+                            members.add(er["b_id"])
+                        elif er["b_id"] == aid:
+                            members.add(er["a_id"])
+                break
+            if members is None:
+                extra_notices.append(
+                    f"材料里的「{phrase}」指一群人,但没法确定具体是谁 —— "
+                    f"可以用人物卡的「批量」手工勾选名单。")
+                continue
 
         if not members:
             extra_notices.append(
@@ -750,6 +827,26 @@ def _align(raw, source_text, circle_id, n_images=0):
                 if (na, nb, kind) in existing:
                     row["existing_strength"] = existing[(na, nb, kind)]
             relation_rows.append(row)
+
+    # 确定性兜底:原文里像群体说法的模式,模型既没标 claim、也没有展开行
+    # 或 notice → 主动提示。最坏情况从"静默丢"变成"明确告知"。
+    # 检测不随 LLM_SEND_RELATIONS 关闭(关闭形态同样会静默丢),只切话术:
+    # 关着时劝"重发"是假希望,直指批量。有图时不测(原文可能只是样板文,
+    # 与 evidence 放行的口径一致)。
+    hints = _unhandled_group_hints(
+        norm_src, raw.get("group_claims") or [], relation_rows,
+        raw.get("notices") or [])
+    if hints and n_images == 0:
+        frag = "」「".join(hints)
+        if config.LLM_SEND_RELATIONS:
+            extra_notices.append(
+                f"材料里的「{frag}」像是指一群人,AI 没能自动展开 —— "
+                f"可以换个说法重发(比如「我所有朋友都认识她」),"
+                f"或用人物卡的「批量」手工勾选。")
+        else:
+            extra_notices.append(
+                f"材料里的「{frag}」像是指一群人;已关闭发送关系网,"
+                f"AI 不会展开 —— 用人物卡的「批量」手工勾选。")
 
     # 传递推导:A-C 和 B-C 都是室友 -> 建议 A-B 也是。
     #

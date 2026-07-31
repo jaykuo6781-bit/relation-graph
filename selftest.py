@@ -929,6 +929,100 @@ def main():
               and any("我」是谁" in n for n in out3["notices"]))
         db.set_me(gid["我测甲"])
 
+        # ---- 确定性兜底(v11):模型两头全空也不能静默丢 ----
+        # v10 的教训:「不静默丢弃」依赖模型配合(claim 或 notice 之一),
+        # 真机上模型两头都空过 —— 兜底检测必须是代码的、确定性的
+        out4 = _llm._align(
+            {"persons": [], "relations": [], "group_claims": [], "notices": []},
+            "Joan也是我的朋友并且她认识我的所有朋友", gc, 0)
+        check("★ 模型 claims/notices 全空 + 原文含群体模式 → 兜底提示上屏",
+              any("没能自动展开" in n for n in out4["notices"]),
+              str(out4["notices"]))
+        out5 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "我的所有朋友", "group": "我的朋友",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "x",
+                               "confidence": 0.9}],
+             "notices": []},
+            "Joan认识我的所有朋友", gc, 0)
+        check("模型已标 claim(同词干)→ 不重复提示",
+              not any("没能自动展开" in n for n in out5["notices"]))
+        out6 = _llm._align(
+            {"persons": [], "relations": [
+                {"a": "Joan", "b": "友测乙", "kind": "点头之交", "strength": 0,
+                 "evidence": "Joan认识我的所有朋友", "confidence": 0.9,
+                 "expanded_from": "我的所有朋友"}],
+             "group_claims": [], "notices": []},
+            "Joan认识我的所有朋友", gc, 0)
+        check("已有展开行(即便没 claim)→ 不重复提示",
+              not any("没能自动展开" in n for n in out6["notices"]))
+        out7 = _llm._align(
+            {"persons": [], "relations": [], "group_claims": [], "notices": []},
+            "我和朋友吃了个饭,大家都很开心", gc, 0)
+        check("普通叙述不误报(模式表宁漏勿滥)",
+              not any("没能自动展开" in n for n in out7["notices"]),
+              str(out7["notices"]))
+        check("模式表全部是归一形态(否则永远匹配不上)",
+              all(_llm._norm_quote(p) == p and _llm._norm_quote(s) == s
+                  for p, s in _llm.GROUP_HINT_PATTERNS))
+        sp2 = _llm._system_prompt([], blk)
+        check("提示词教了代词还原与方向无关(实测失败形态的钉子)",
+              "X认识我所有朋友" in sp2 and "还原成" in sp2
+              and "方向不影响识别" in sp2)
+
+        prev_send = _llm.config.LLM_SEND_RELATIONS
+        _llm.config.LLM_SEND_RELATIONS = False
+        try:
+            out8 = _llm._align(
+                {"persons": [], "relations": [], "group_claims": [],
+                 "notices": []}, "她认识我的所有朋友", gc, 0)
+            check("关闭发送关系网:兜底不劝重发、直指批量",
+                  any("批量" in n and "重发" not in n for n in out8["notices"]),
+                  str(out8["notices"]))
+        finally:
+            _llm.config.LLM_SEND_RELATIONS = prev_send
+
+        # ---- anchor 泛化(v11):「某人的室友/同学/朋友」纯代码解析 ----
+        db.upsert_relation(gc, gid["友测乙"], gid["同事丁"], "室友", 2)
+        out9 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "友测乙的室友", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0,
+                               "evidence": "友测乙的室友都认识Joan",
+                               "confidence": 0.9}],
+             "notices": []},
+            "友测乙的室友都认识Joan", gc, 0)
+        a9 = [r for r in out9["relations"] if r.get("expanded_from")]
+        check("「某人的室友」被确定性展开(anchor = 友测乙)",
+              len(a9) == 1 and a9[0]["a_name"] == "同事丁"
+              and a9[0]["b_name"] == "Joan" and a9[0]["kind"] == "点头之交"
+              and a9[0]["accepted"] is True, str(a9))
+        out9b = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "友测乙的室友都认识", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0,
+                               "evidence": "友测乙的室友都认识Joan",
+                               "confidence": 0.9}],
+             "notices": []},
+            "友测乙的室友都认识Joan", gc, 0)
+        check("phrase 带「都认识」尾巴也能解析(真机实测的模型习惯)",
+              len([r for r in out9b["relations"] if r.get("expanded_from")]) == 1,
+              str(out9b["notices"]))
+        out10 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "我和友测乙的室友", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "x",
+                               "confidence": 0.9}],
+             "notices": []},
+            "我和友测乙的室友都认识Joan", gc, 0)
+        check("歧义前缀(我和友测乙)不硬展开,落批量提示",
+              not [r for r in out10["relations"] if r.get("expanded_from")]
+              and any("批量" in n for n in out10["notices"]), str(out10["notices"]))
+
         # commit:展开行带 id 不造人;幽灵行 accepted=False 不入库
         n_before = len(db.list_people())
         res = _llm.commit({"persons": [], "source": "", "relations": [
