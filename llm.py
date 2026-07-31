@@ -57,12 +57,16 @@ GROUP_HINT_PATTERNS = (
 def _unhandled_group_hints(norm_src, claims, relation_rows, notices):
     """确定性兜底:原文像群体说法、但模型两头都空着的模式。返回命中子串。
 
-    纯函数,selftest 直接打桩测。handled 集合把模型 claim 的 phrase/evidence、
-    已生成的展开行、模型自己写的 notices 全拼起来归一化 —— 模型写的短语
+    纯函数,selftest 直接打桩测。handled 集合把模型 claim 的 phrase、
+    已生成的展开行、模型自己写的 notices 拼起来归一化 —— 模型写的短语
     (「我的朋友们」)和探测子串(「朋友们都」)对不上没关系,词干对上就算已处理。
+    ⚠ 刻意**不算** claim 的 evidence:它常常引用整句话,一句里有两个群体
+    说法时(「我和X的室友都认识,她认识我所有朋友」),只处理了朋友那个、
+    evidence 却带着「室友都」—— 把 evidence 算进来,室友那个漏网就被掩盖了
+    (真机抓到过)。
     """
     handled = _norm_quote("".join(
-        [(c.get("phrase") or "") + (c.get("evidence") or "")
+        [(c.get("phrase") or "")
          for c in claims if isinstance(c, dict)]
         + [r.get("expanded_from") or "" for r in relation_rows]
         + [n for n in notices if isinstance(n, str)]))
@@ -165,6 +169,8 @@ def _system_prompt(roster, relations_block=None):
 - evidence:材料里说这句话的那个原句。
 例:「我和 Alex 的室友都认识」→ {phrase:「Alex的室友」, group:「其他」,
 target:「我」的真名, kind:「点头之交」}。
+「X也是我的朋友」这句话本身就是一条关系(我—X:朋友),必须照常在
+relations 里输出,别因为它挨着群体说法就漏掉。
 两条边界(容易搞错,请逐字执行):
 - 只有**点名一群人**的说法(我所有朋友、我们部门的人、大家)才进 group_claims;
   「她和某乙比较亲近」这种**两个人之间**的关系,**绝不进 group_claims**,
@@ -252,6 +258,36 @@ a 是师傅/提携者/上级/暗恋者/出借方。
 {group_block}{roster_block}{rel_text}"""
 
 
+def _group_claims_schema():
+    """group_claims 数组的 schema。主抽取和专注重试(_retry_group_claims)
+    共用同一份 —— 两处各写一份迟早分叉。"""
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "phrase": {"type": "string",
+                           "description": "群体短语的原文"},
+                "group": {"type": "string",
+                          "enum": ["我的朋友", "我们部门", "其他"]},
+                "target": {"type": "string",
+                           "description": "群体说法指向的那个人的姓名"},
+                "kind": {"type": "string",
+                         "enum": list(db.RELATION_KINDS)},
+                "strength": {"type": "integer",
+                             "description": "-3 到 3"},
+                "evidence": {"type": "string",
+                             "description": "材料里说这句话的原句"},
+                "confidence": {"type": "number",
+                               "description": "0 到 1"},
+            },
+            "required": ["phrase", "group", "target", "kind",
+                         "strength", "evidence", "confidence"],
+            "additionalProperties": False,
+        },
+    }
+
+
 def _schema():
     return {
         "type": "object",
@@ -293,31 +329,7 @@ def _schema():
             },
             # 群体说法只**标记**,不展开 —— 名单枚举是查表活,实测小模型
             # 做不可靠(会漏人、会把"我的朋友"当成"我"),交给代码做
-            "group_claims": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "phrase": {"type": "string",
-                                   "description": "群体短语的原文"},
-                        "group": {"type": "string",
-                                  "enum": ["我的朋友", "我们部门", "其他"]},
-                        "target": {"type": "string",
-                                   "description": "群体说法指向的那个人的姓名"},
-                        "kind": {"type": "string",
-                                 "enum": list(db.RELATION_KINDS)},
-                        "strength": {"type": "integer",
-                                     "description": "-3 到 3"},
-                        "evidence": {"type": "string",
-                                     "description": "材料里说这句话的原句"},
-                        "confidence": {"type": "number",
-                                       "description": "0 到 1"},
-                    },
-                    "required": ["phrase", "group", "target", "kind",
-                                 "strength", "evidence", "confidence"],
-                    "additionalProperties": False,
-                },
-            },
+            "group_claims": _group_claims_schema(),
             "notices": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -390,6 +402,58 @@ def _client():
     if config.LLM_BASE_URL:
         kwargs["base_url"] = config.LLM_BASE_URL
     return OpenAI(**kwargs)
+
+
+def _retry_group_claims(source_text, hints, circle_id):
+    """专注重试:只让模型做「标记群体说法」这一件事。
+
+    主抽取是多任务(人物+关系+群体+出处),4o-mini 负载一高就漏标群体
+    (真机 0/3 抓到过)。确定性检测(GROUP_HINT_PATTERNS)发现漏网时,
+    发起这次单任务小调用 —— 单任务提示的服从率高得多。
+    失败(断网/没配 Key)由调用方吞掉,落回确定性提示兜底。
+    """
+    me = db.get_me()
+    roster = db.list_people(circle_id)
+    names = "、".join(p["name"] for p in roster[:120])
+    me_line = f"「我」就是「{me['name']}」,涉及「我」时写这个真名。" if me else ""
+    sys_p = f"""材料里疑似有这些指向一群人的说法:「{'」「'.join(hints)}」。
+你只做一件事:把材料里**指向一群人**的说法逐条记进 group_claims:
+- phrase:群体短语的原文;「Alex 的室友们」这类别人的群体,phrase 要带上
+  那个人的名字(如「Alex的室友」)。
+- group:「我的朋友」(我的朋友/好友/兄弟们)/「我们部门」(按部门/班级)/
+  「其他」三选一。
+- target:这群人认识/接触的那个人的**真名**。代词(她/他)要还原:
+  「Joan也是我的朋友并且她认识…」里的「她」指 Joan(刚被介绍的那个人),
+  **不是**句子后面挨着的名字;「我和X的室友都认识」的 target 是「我」的真名。
+- kind:泛泛的「认识」「都认识」「共有」用「点头之交」,strength 0。
+- evidence:材料里说这句话的那个原句。
+{me_line}这个圈子里已有的人:{names}。
+具体名单由程序确定,你不用列。没法确定的写进 notices;没有就给空数组。"""
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "group_claims": _group_claims_schema(),
+            "notices": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["group_claims", "notices"],
+        "additionalProperties": False,
+    }
+    client = _client()
+    resp = client.chat.completions.create(
+        model=config.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": sys_p},
+            {"role": "user", "content": source_text[:4000]},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "group_claims_only",
+                            "strict": True, "schema": schema},
+        },
+        temperature=0,
+    )
+    return json.loads(resp.choices[0].message.content or "{}")
 
 
 def _human_llm_error(e):
@@ -696,137 +760,238 @@ def _align(raw, source_text, circle_id, n_images=0):
     me_in = bool(me) and any(p["id"] == me["id"] for p in circle_people)
     name_of = {p["id"]: p["name"] for p in circle_people}
 
-    for gcm in raw.get("group_claims", []):
-        phrase = (gcm.get("phrase") or "").strip()
-        target_name = (gcm.get("target") or "").strip()
-        gtype = (gcm.get("group") or "其他").strip()
-        kind = db.normalize_kind(gcm.get("kind") or "点头之交")
-        if kind not in db.RELATION_KINDS:
-            kind = "点头之交"
-        info = db.RELATION_KINDS[kind]
-        try:
-            strength = max(-3, min(3, int(gcm.get("strength", info["default"]))))
-        except (TypeError, ValueError):
-            strength = info["default"]
-        evidence = gcm.get("evidence", "")
-        try:
-            conf = round(float(gcm.get("confidence", 0) or 0), 2)
-        except (TypeError, ValueError):
-            conf = 0.0
-        if not phrase or not target_name:
-            continue
-        if not me_in:
-            extra_notices.append(
-                f"材料里的「{phrase}」指一群人,但还没在这个圈子里标记"
-                f"「我」是谁,没法确定名单 —— 去设置页指定后重发,"
-                f"或用人物卡的「批量」手工勾选。")
-            continue
+    # 展开去噪的依据(真机用户抓到过"朋友+2 与 点头之交 0 并存"的自相矛盾):
+    # batch_pairs = 本批**直接说的**关系对(任意 kind,名字归一化);
+    # db_pairs    = 库里已有任意关系的对(按 id)。
+    batch_pairs = {
+        frozenset((_norm_quote(r["a_name"]), _norm_quote(r["b_name"])))
+        for r in relation_rows if not r.get("expanded_from")}
+    db_pairs = {frozenset((a, b)) for (a, b, _k) in existing}
 
-        # 名单:确定性地从库里圈
-        if gtype == "我的朋友":
-            members = set()
-            for er in db.list_relations(circle_id):
-                if er["kind"] not in AFFECT_KINDS:
-                    continue
-                if er["a_id"] == me["id"]:
-                    members.add(er["b_id"])
-                elif er["b_id"] == me["id"]:
-                    members.add(er["a_id"])
-        elif gtype == "我们部门":
-            dept = (me.get("dept") or "").strip()
-            if not dept:
+    # claims 的处理包成闭包:主抽取标的和专注重试补标的走**同一段代码**。
+    # handled_claims 记录处理过的全部 claim,供补行与兜底检测使用。
+    handled_claims = []
+
+    def _process_claims(claim_list):
+        for gcm in claim_list:
+            if not isinstance(gcm, dict):
+                continue
+            handled_claims.append(gcm)
+            phrase = (gcm.get("phrase") or "").strip()
+            target_name = (gcm.get("target") or "").strip()
+            gtype = (gcm.get("group") or "其他").strip()
+            kind = db.normalize_kind(gcm.get("kind") or "点头之交")
+            if kind not in db.RELATION_KINDS:
+                kind = "点头之交"
+            info = db.RELATION_KINDS[kind]
+            try:
+                strength = max(-3, min(3, int(gcm.get("strength", info["default"]))))
+            except (TypeError, ValueError):
+                strength = info["default"]
+            evidence = gcm.get("evidence", "")
+            try:
+                conf = round(float(gcm.get("confidence", 0) or 0), 2)
+            except (TypeError, ValueError):
+                conf = 0.0
+            if not phrase or not target_name:
+                continue
+            if not me_in:
                 extra_notices.append(
-                    f"「{phrase}」按部门圈人,但「我」({me['name']})"
-                    f"还没填部门,没法确定名单。")
+                    f"材料里的「{phrase}」指一群人,但还没在这个圈子里标记"
+                    f"「我」是谁,没法确定名单 —— 去设置页指定后重发,"
+                    f"或用人物卡的「批量」手工勾选。")
                 continue
-            members = {p["id"] for p in circle_people
-                       if (p.get("dept") or "").strip() == dept
-                       and p["id"] != me["id"]}
-        else:
-            # 「某人的室友/同学/朋友」:phrase 恰好是「<圈内唯一人名>的室友」
-            # 这类形态时,确定性解析出 anchor,照查表展开。
-            # 保守闸:前缀匹配不到唯一的人(「我和alex的室友」的前缀是
-            # "我和alex")→ 不硬展开 —— 这句连人读着都有歧义。
-            members = None
-            npz = _norm_quote(phrase)
-            # 模型给的 phrase 常带尾巴(「Alex的室友都认识」「…的室友们」),
-            # 剥掉这些不影响语义的后缀再匹配 —— 歧义闸(前缀必须是唯一人名)
-            # 不因此放松
-            for suf in ("都认识", "都熟", "都见过", "都", "们"):
-                if npz.endswith(suf):
-                    npz = npz[: -len(suf)]
-            for kw, kinds in (("室友", ("室友",)), ("同学", ("同学",)),
-                              ("朋友", AFFECT_KINDS)):
-                if not npz.endswith("的" + kw):
+
+            # 名单:确定性地从库里圈
+            if gtype == "我的朋友":
+                members = set()
+                for er in db.list_relations(circle_id):
+                    if er["kind"] not in AFFECT_KINDS:
+                        continue
+                    if er["a_id"] == me["id"]:
+                        members.add(er["b_id"])
+                    elif er["b_id"] == me["id"]:
+                        members.add(er["a_id"])
+            elif gtype == "我们部门":
+                dept = (me.get("dept") or "").strip()
+                if not dept:
+                    extra_notices.append(
+                        f"「{phrase}」按部门圈人,但「我」({me['name']})"
+                        f"还没填部门,没法确定名单。")
                     continue
-                owner = npz[: -len(kw) - 1]
-                if owner in ("我", _norm_quote(me["name"])):
-                    cand = [me]
-                else:
-                    cand = [p for p in circle_people
-                            if _norm_quote(p["name"]) == owner]
-                if len(cand) == 1:
-                    aid = cand[0]["id"]
-                    members = set()
-                    for er in db.list_relations(circle_id):
-                        if er["kind"] not in kinds:
-                            continue
-                        if er["a_id"] == aid:
-                            members.add(er["b_id"])
-                        elif er["b_id"] == aid:
-                            members.add(er["a_id"])
-                break
-            if members is None:
+                members = {p["id"] for p in circle_people
+                           if (p.get("dept") or "").strip() == dept
+                           and p["id"] != me["id"]}
+            else:
+                # 「某人的室友/同学/朋友」:phrase 恰好是「<圈内唯一人名>的室友」
+                # 这类形态时,确定性解析出 anchor,照查表展开。
+                # 保守闸:前缀匹配不到唯一的人(「我和alex的室友」的前缀是
+                # "我和alex")→ 不硬展开 —— 这句连人读着都有歧义。
+                members = None
+                npz = _norm_quote(phrase)
+                # 模型给的 phrase 常带尾巴(「Alex的室友都认识」「…的室友们」),
+                # 剥掉这些不影响语义的后缀再匹配 —— 歧义闸(前缀必须是唯一人名)
+                # 不因此放松
+                for suf in ("都认识", "都熟", "都见过", "都", "们"):
+                    if npz.endswith(suf):
+                        npz = npz[: -len(suf)]
+                force_me_target = False
+                for kw, kinds in (("室友", ("室友",)), ("同学", ("同学",)),
+                                  ("朋友", AFFECT_KINDS)):
+                    if not npz.endswith("的" + kw):
+                        continue
+                    owner = npz[: -len(kw) - 1]
+                    # 「我和X的室友都认识」= X 的室友们都认识**我**(用户点名过
+                    # 这个语义)。剥掉「我和/我跟」,anchor 取 X,target 强制改成
+                    # 「我」—— 这个形态下模型填的 target 不可信,经常是句子里
+                    # 别的人。
+                    for pre in ("我和", "我跟"):
+                        if owner.startswith(pre) and len(owner) > len(pre):
+                            owner = owner[len(pre):]
+                            force_me_target = True
+                            break
+                    if owner in ("我", _norm_quote(me["name"])):
+                        cand = [me]
+                    else:
+                        cand = [p for p in circle_people
+                                if _norm_quote(p["name"]) == owner]
+                    if len(cand) == 1:
+                        aid = cand[0]["id"]
+                        members = set()
+                        for er in db.list_relations(circle_id):
+                            if er["kind"] not in kinds:
+                                continue
+                            if er["a_id"] == aid:
+                                members.add(er["b_id"])
+                            elif er["b_id"] == aid:
+                                members.add(er["a_id"])
+                    break
+                if members is not None and force_me_target:
+                    target_name = me["name"]
+                if members is None:
+                    extra_notices.append(
+                        f"材料里的「{phrase}」指一群人,但没法确定具体是谁 —— "
+                        f"可以用人物卡的「批量」手工勾选名单。")
+                    continue
+
+            if not members:
                 extra_notices.append(
-                    f"材料里的「{phrase}」指一群人,但没法确定具体是谁 —— "
-                    f"可以用人物卡的「批量」手工勾选名单。")
+                    f"「{phrase}」按关系网找不到对应的人(还没记录这类关系),"
+                    f"没有展开。")
                 continue
 
-        if not members:
-            extra_notices.append(
-                f"「{phrase}」按关系网找不到对应的人(还没记录这类关系),"
-                f"没有展开。")
-            continue
+            # 对象可能是本次材料新引入的人(库里没有)—— 不算幽灵,
+            # 除非原文里也找不到这个名字(那就是模型编的)
+            pt, _how_t = _match_person(target_name, all_people)
+            target_id = pt["id"] if pt else None
+            target_ghost = (n_images == 0 and target_id is None
+                            and _norm_quote(target_name) not in norm_src)
 
-        # 对象可能是本次材料新引入的人(库里没有)—— 不算幽灵,
-        # 除非原文里也找不到这个名字(那就是模型编的)
-        pt, _how_t = _match_person(target_name, all_people)
-        target_id = pt["id"] if pt else None
-        target_ghost = (n_images == 0 and target_id is None
-                        and _norm_quote(target_name) not in norm_src)
+            for mid in sorted(members):
+                m_name = name_of.get(mid)
+                if not m_name or mid == target_id or m_name == target_name:
+                    continue
+                # 去噪①:这一对在本批已有**直接说的**关系(任意 kind)——
+                # 直接说的更具体,再出一条泛泛的展开行只会自相矛盾
+                if frozenset((_norm_quote(m_name), _norm_quote(target_name))) \
+                        in batch_pairs:
+                    continue
+                # 去噪②:泛泛的「点头之交」在库里该对已有任何关系时是废话
+                # (已经是朋友了还说"认识",用户读着刺眼)。非点头之交的展开
+                # 保持原语义:同 kind 已存在 → 标 existing_strength、默认不勾
+                if kind == "点头之交" and target_id and \
+                        frozenset((mid, target_id)) in db_pairs:
+                    continue
+                pair_key = (kind, m_name, target_name) if kind in db.DIRECTED_KINDS \
+                    else (kind,) + tuple(sorted((m_name, target_name)))
+                if pair_key in seen_pairs:      # 模型已直接抽过这一条就不重复
+                    continue
+                seen_pairs.add(pair_key)
+                row = {
+                    "a_name": m_name, "b_name": target_name,
+                    "a_id": mid, "b_id": target_id,
+                    "a_match": "exact", "b_match": _how_t,
+                    "kind": kind,
+                    "cat": info["cat"],
+                    "glyph": db.CATEGORY_GLYPH.get(info["cat"], ""),
+                    "strength": strength,
+                    "evidence": evidence,
+                    "evidence_ok": evidence_in_source(
+                        evidence, source_text, n_images > 0),
+                    "confidence": conf,
+                    "accepted": True,
+                    "expanded_from": phrase,
+                }
+                if target_ghost:
+                    row["expand_ghost"] = True
+                    row["accepted"] = False
+                if target_id:
+                    na, nb, _d = db.normalize_pair(mid, target_id, kind)
+                    if (na, nb, kind) in existing:
+                        row["existing_strength"] = existing[(na, nb, kind)]
+                relation_rows.append(row)
 
-        for mid in sorted(members):
-            m_name = name_of.get(mid)
-            if not m_name or mid == target_id or m_name == target_name:
+    _process_claims(raw.get("group_claims") or [])
+
+    # 专注重试:主调用没标出群体说法、而确定性检测发现了模式时,发起
+    # 第二次**只做标记这一件事**的小调用 —— 整句多任务负载下 4o-mini
+    # 常漏标(真机 0/3 抓到过),单任务提示的服从率高得多。
+    # 失败就算了,外面还有确定性提示兜底;测试环境用打桩替掉它。
+    if me_in and n_images == 0 and config.LLM_SEND_RELATIONS:
+        pending_hints = _unhandled_group_hints(
+            norm_src, handled_claims, relation_rows,
+            raw.get("notices") or [])
+        if pending_hints:
+            try:
+                retry = _retry_group_claims(
+                    source_text, pending_hints, circle_id)
+            except Exception:
+                retry = None
+            if retry:
+                _process_claims(retry.get("group_claims") or [])
+                extra_notices.extend(
+                    n.strip()[:200] for n in retry.get("notices", [])
+                    if isinstance(n, str) and n.strip())
+
+    # 「T也是我的朋友」确定性补行:claim 已经指认了 T,原文又含这个可以
+    # 精确匹配的句式,而模型偶尔会漏掉这条**直接**关系(真机波动抓到过:
+    # 展开做了、「Joan也是我的朋友」本身反而没了)。名字已知、句式可查 ——
+    # 不必求模型。
+    if me_in:
+        for gcm in handled_claims:
+            if (gcm.get("group") or "").strip() != "我的朋友":
                 continue
-            pair_key = (kind, m_name, target_name) if kind in db.DIRECTED_KINDS \
-                else (kind,) + tuple(sorted((m_name, target_name)))
-            if pair_key in seen_pairs:      # 模型已直接抽过这一条就不重复
+            t = (gcm.get("target") or "").strip()
+            if not t or _norm_quote(t) == _norm_quote(me["name"]):
                 continue
+            hit = next((frag for frag in (t + "也是我的朋友", t + "是我的朋友")
+                        if _norm_quote(frag) in norm_src), None)
+            if not hit:
+                continue
+            if frozenset((_norm_quote(me["name"]), _norm_quote(t))) in batch_pairs:
+                continue                    # 模型这次没漏,别重复
+            pair_key = ("朋友",) + tuple(sorted((me["name"], t)))
+            if pair_key in seen_pairs:
+                continue
+            pt2, how2 = _match_person(t, all_people)
+            tid = pt2["id"] if pt2 else None
+            if tid and frozenset((me["id"], tid)) in db_pairs:
+                continue                    # 库里已有 me—T 的关系,不必补
             seen_pairs.add(pair_key)
-            row = {
-                "a_name": m_name, "b_name": target_name,
-                "a_id": mid, "b_id": target_id,
-                "a_match": "exact", "b_match": _how_t,
-                "kind": kind,
-                "cat": info["cat"],
-                "glyph": db.CATEGORY_GLYPH.get(info["cat"], ""),
-                "strength": strength,
-                "evidence": evidence,
-                "evidence_ok": evidence_in_source(
-                    evidence, source_text, n_images > 0),
-                "confidence": conf,
+            info_f = db.RELATION_KINDS["朋友"]
+            relation_rows.append({
+                "a_name": me["name"], "b_name": t,
+                "a_id": me["id"], "b_id": tid,
+                "a_match": "exact", "b_match": how2,
+                "kind": "朋友", "cat": info_f["cat"],
+                "glyph": db.CATEGORY_GLYPH.get(info_f["cat"], ""),
+                "strength": 2,
+                "evidence": hit,
+                "evidence_ok": evidence_in_source(hit, source_text, n_images > 0),
+                "confidence": 0.9,
                 "accepted": True,
-                "expanded_from": phrase,
-            }
-            if target_ghost:
-                row["expand_ghost"] = True
-                row["accepted"] = False
-            if target_id:
-                na, nb, _d = db.normalize_pair(mid, target_id, kind)
-                if (na, nb, kind) in existing:
-                    row["existing_strength"] = existing[(na, nb, kind)]
-            relation_rows.append(row)
+                "expanded_from": "",
+            })
 
     # 确定性兜底:原文里像群体说法的模式,模型既没标 claim、也没有展开行
     # 或 notice → 主动提示。最坏情况从"静默丢"变成"明确告知"。
@@ -834,7 +999,7 @@ def _align(raw, source_text, circle_id, n_images=0):
     # 关着时劝"重发"是假希望,直指批量。有图时不测(原文可能只是样板文,
     # 与 evidence 放行的口径一致)。
     hints = _unhandled_group_hints(
-        norm_src, raw.get("group_claims") or [], relation_rows,
+        norm_src, handled_claims, relation_rows,
         raw.get("notices") or [])
     if hints and n_images == 0:
         frag = "」「".join(hints)

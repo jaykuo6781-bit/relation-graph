@@ -1943,6 +1943,19 @@ console.log("\n群体说法展开(v10):AI 按关系网展开「我所有朋友�
   check("「某人的室友/同学/朋友」有确定性 anchor 解析",
         /endswith\("的" \+ kw\)/.test(py) &&
         /\("室友", \("室友",\)\), \("同学", \("同学",\)\)/.test(py));
+
+  /* v12:真机三连抓的修正 —— 谁回退这三条,用户的原句会再翻车 */
+  check("「我和X的…」前缀解析且 target 强制为「我」",
+        /\("我和", "我跟"\)/.test(py) && /force_me_target/.test(py) &&
+        /target_name = me\["name"\]/.test(py));
+  check("展开去噪:直接说的关系优先,泛泛的点头之交不并存",
+        /batch_pairs/.test(py) && /db_pairs/.test(py) &&
+        /kind == "点头之交" and target_id/.test(py));
+  check("「T也是我的朋友」漏抽时按 claim 精确补行",
+        /也是我的朋友/.test(py) && /"strength": 2/.test(py));
+  check("主抽取漏标时有专注重试(单任务小调用),失败落回确定性提示",
+        /_retry_group_claims/.test(py) && /pending_hints/.test(py) &&
+        /except Exception:\s*\n\s*retry = None/.test(py));
 }
 
 console.log("\n" + "=".repeat(52));

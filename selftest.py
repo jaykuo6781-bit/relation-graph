@@ -776,6 +776,10 @@ def main():
     # set_me 是全局唯一的,测完必须恢复 —— 否则会污染前面按 demo 的「我」
     # 算好的局势用例(这是 selftest 里最容易踩的坑,写在这里当警示)
     prev_me = db.get_me()
+    # 专注重试打桩:测试环境绝不打真 API(Windows 上 .env 里有真 Key,
+    # 不桩的话 _align 的兜底路径会真发一次请求)
+    prev_retry = _llm._retry_group_claims
+    _llm._retry_group_claims = lambda *a, **k: None
     gc = db.create_circle("_群展测试", "自定义")
     for nm in ("我测甲", "友测乙", "友测丙", "同事丁"):
         db.upsert_person(nm, circle_id=gc)
@@ -1011,6 +1015,13 @@ def main():
         check("phrase 带「都认识」尾巴也能解析(真机实测的模型习惯)",
               len([r for r in out9b["relations"] if r.get("expanded_from")]) == 1,
               str(out9b["notices"]))
+        # v12:「我和X的室友都认识」= X 的室友们都认识**我**(用户点名的语义)。
+        # 给友测乙添一个与「我」无既有关系的室友,验证 target 被强制成「我」;
+        # 同事丁虽也是友测乙的室友,但和「我」已有同事关系 → 点头之交去噪跳过
+        db.upsert_person("室友戊", circle_id=gc)
+        gid["室友戊"] = db.find_person_by_name("室友戊")["id"]
+        db.upsert_relation(gc, gid["友测乙"], gid["室友戊"], "室友", 2)
+        db.upsert_relation(gc, gid["友测乙"], gid["同事丁"], "室友", 2)
         out10 = _llm._align(
             {"persons": [], "relations": [],
              "group_claims": [{"phrase": "我和友测乙的室友", "group": "其他",
@@ -1019,9 +1030,78 @@ def main():
                                "confidence": 0.9}],
              "notices": []},
             "我和友测乙的室友都认识Joan", gc, 0)
-        check("歧义前缀(我和友测乙)不硬展开,落批量提示",
-              not [r for r in out10["relations"] if r.get("expanded_from")]
-              and any("批量" in n for n in out10["notices"]), str(out10["notices"]))
+        a10 = [r for r in out10["relations"] if r.get("expanded_from")]
+        check("「我和X的室友」展开且 target 强制为「我」(模型给的 Joan 不可信)",
+              len(a10) == 1 and a10[0]["a_name"] == "室友戊"
+              and a10[0]["b_name"] == "我测甲"
+              and not any("批量" in n for n in out10["notices"]),
+              str(a10) + str(out10["notices"]))
+        check("与「我」已有关系的室友被点头之交去噪跳过(同事丁不出现)",
+              not any(r["a_name"] == "同事丁" for r in a10))
+        out10b = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "他和友测乙的室友", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "x",
+                               "confidence": 0.9}],
+             "notices": []},
+            "他和友测乙的室友都认识Joan", gc, 0)
+        check("真歧义前缀(他和友测乙)仍不硬展开,落批量提示",
+              not [r for r in out10b["relations"] if r.get("expanded_from")]
+              and any("批量" in n for n in out10b["notices"]))
+
+        # v12 去噪①:本批直接说的关系(任意 kind)优先,泛泛展开行不并存
+        out11 = _llm._align(
+            {"persons": [],
+             "relations": [{"a": "Joan", "b": "友测乙", "kind": "朋友",
+                            "strength": 2, "evidence": "她和友测乙会比较亲近",
+                            "confidence": 0.9, "expanded_from": ""}],
+             "group_claims": [{"phrase": "我的所有朋友", "group": "我的朋友",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0,
+                               "evidence": "她认识我的所有朋友",
+                               "confidence": 0.9}],
+             "notices": []},
+            "她和友测乙会比较亲近,她认识我的所有朋友", gc, 0)
+        e11 = [r for r in out11["relations"] if r.get("expanded_from")]
+        check("直接说的对(Joan—友测乙 朋友)不再伴生点头之交展开行",
+              not any({r["a_name"], r["b_name"]} == {"Joan", "友测乙"}
+                      for r in e11)
+              and any(r["a_name"] == "友测丙" for r in e11), str(e11))
+
+        # v12 补行:「T也是我的朋友」被模型漏掉时,代码按 claim 的 T 精确补
+        out12 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "我的所有朋友", "group": "我的朋友",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0,
+                               "evidence": "她认识我的所有朋友",
+                               "confidence": 0.9}],
+             "notices": []},
+            "Joan也是我的朋友并且她认识我的所有朋友", gc, 0)
+        d12 = [r for r in out12["relations"]
+               if not r.get("expanded_from") and not r.get("derived")]
+        check("★ 模型漏了「Joan也是我的朋友」→ 代码补 我—Joan 朋友+2",
+              len(d12) == 1 and d12[0]["a_name"] == "我测甲"
+              and d12[0]["b_name"] == "Joan" and d12[0]["kind"] == "朋友"
+              and d12[0]["strength"] == 2 and d12[0]["evidence_ok"] is True
+              and d12[0]["expanded_from"] == "", str(d12))
+        out12b = _llm._align(
+            {"persons": [],
+             "relations": [{"a": "我测甲", "b": "Joan", "kind": "朋友",
+                            "strength": 2, "evidence": "Joan也是我的朋友",
+                            "confidence": 0.9, "expanded_from": ""}],
+             "group_claims": [{"phrase": "我的所有朋友", "group": "我的朋友",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0,
+                               "evidence": "她认识我的所有朋友",
+                               "confidence": 0.9}],
+             "notices": []},
+            "Joan也是我的朋友并且她认识我的所有朋友", gc, 0)
+        pj = [r for r in out12b["relations"] if r["kind"] == "朋友"
+              and {r["a_name"], r["b_name"]} == {"我测甲", "Joan"}]
+        check("模型没漏时不重复补行(我—Joan 朋友只有一条)",
+              len(pj) == 1, str(pj))
 
         # commit:展开行带 id 不造人;幽灵行 accepted=False 不入库
         n_before = len(db.list_people())
@@ -1040,10 +1120,33 @@ def main():
         check("展开行的原句落进了 notes(入库后能看到出处)",
               any(r["kind"] == "点头之交" and "Joan" in (r["notes"] or "")
                   for r in db.list_relations(gc)))
+        # v12:专注重试链路 —— 主抽取漏标时,重试标出的 claim 走同一段展开
+        _llm._retry_group_claims = lambda s, h, c: {
+            "group_claims": [{"phrase": "我的所有朋友", "group": "我的朋友",
+                              "target": "Joan", "kind": "点头之交",
+                              "strength": 0,
+                              "evidence": "她认识我的所有朋友",
+                              "confidence": 0.9}],
+            "notices": []}
+        out13 = _llm._align(
+            {"persons": [], "relations": [], "group_claims": [], "notices": []},
+            "她认识我的所有朋友", gc, 0)
+        e13 = [r for r in out13["relations"] if r.get("expanded_from")]
+        check("★ 专注重试补标 → 展开照常发生,不再落兜底提示",
+              len(e13) >= 2
+              and not any("没能自动展开" in n for n in out13["notices"]),
+              str(e13) + str(out13["notices"]))
+        _llm._retry_group_claims = lambda *a, **k: None
+        out14 = _llm._align(
+            {"persons": [], "relations": [], "group_claims": [], "notices": []},
+            "她认识我的所有朋友", gc, 0)
+        check("重试也失败时,确定性提示兜底仍在",
+              any("没能自动展开" in n for n in out14["notices"]))
     finally:
         db.set_me(prev_me["id"])
+        _llm._retry_group_claims = prev_retry
         db.delete_circle(gc)
-        for nm in ("我测甲", "友测乙", "友测丙", "同事丁"):
+        for nm in ("我测甲", "友测乙", "友测丙", "同事丁", "室友戊"):
             pp = db.find_person_by_name(nm)
             if pp:
                 db.delete_person(pp["id"])
