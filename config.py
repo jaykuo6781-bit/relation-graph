@@ -136,6 +136,16 @@ LLM_PROVIDER = os.environ.get("RELGRAPH_LLM_PROVIDER", "openai")
 LLM_MODEL = os.environ.get("RELGRAPH_LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 LLM_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
+# 单次模型请求的超时(秒)。不设的话,断网/被墙时请求能挂上几分钟,
+# 前端的 busy 遮罩就一直转,用户只能强刷页面 —— 必须给它一个出口。
+# 坏值(比如写成 "120s")回落默认并警告:一个可选的调优项没有资格
+# 在 import 期抛异常把整个服务掀翻 —— 那个错连启动横幅都到不了。
+try:
+    LLM_TIMEOUT = float(os.environ.get("RELGRAPH_LLM_TIMEOUT") or 120)
+except ValueError:
+    print(f"⚠ RELGRAPH_LLM_TIMEOUT={os.environ.get('RELGRAPH_LLM_TIMEOUT')!r} "
+          f"不是数字,已改用默认 120 秒")
+    LLM_TIMEOUT = 120.0
 
 
 def llm_configured():

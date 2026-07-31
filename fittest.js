@@ -621,7 +621,7 @@ console.log("\n增量补丁的纯计算部分");
 
   check("GraphView 导出了 upsertEdge / removeEdge",
         /upsertEdge/.test(gjs) && /removeEdge/.test(gjs) &&
-        /return \{[^}]*upsertEdge, removeEdge \};/.test(gjs.replace(/\n/g, " ")),
+        /return \{[^}]*upsertEdge, removeEdge,/.test(gjs.replace(/\n/g, " ")),
         "app.js 调不到就只能整张重排了");
   check("GraphRender 导出了 edgeMarkup / streakDef / pairAggregate",
         ["edgeMarkup", "streakDef", "pairAggregate", "pairKey", "edgeFromPair"]
@@ -665,8 +665,19 @@ console.log("\n手动录入(加人 / 加关系 / 改强度 / 记一笔)");
         "它跑到 if 外面了 —— 每存一条关系都会整张重排");
   check("saveRelation 自己不碰 S.graphLoaded(统一交给 syncPairEdge)",
         !/S\.graphLoaded = false/.test(body("async function saveRelation")));
-  check("复位键是重新排布的显式出口(有补丁时才重排,绝不偷偷排)",
-        /S\.patched/.test(ajs) && /#fitBtn"\)\.onclick[\s\S]{0,400}S\.patched/.test(ajs));
+  /* 重排的显式出口从复位键换成了图上的药丸(#relayoutChip):
+     复位键回归单一语义 —— 它的函数体里绝不能再出现 loadGraph(那就是
+     "看不见的按钮变义"回潮);药丸由 syncPairEdge 在打补丁时浮现。 */
+  // 只看 fitBtn 处理器自己的函数体(到第一个顶格缩进的 `};` 为止),
+  // 否则会把紧随其后的重排药丸处理器里的 loadGraph 误算进来
+  const fitBody = (ajs.match(/\$\("#fitBtn"\)\.onclick = \(\) => \{([\s\S]*?)\n  \};/) || [])[1] || "";
+  check("复位键单一语义(fitBtn 的处理器里没有整图重排)",
+        fitBody.length > 0 && !/loadGraph/.test(fitBody) && !/S\.patched/.test(fitBody));
+  check("重排走显式药丸:补丁时浮现,点击才 loadGraph",
+        /if \(patched\) \{[\s\S]{0,300}relayoutChip[\s\S]{0,120}classList\.remove\("hidden"\)/.test(ajs) &&
+        /#relayoutChip"\)\.onclick[\s\S]{0,300}loadGraph/.test(ajs));
+  check("整图重载后药丸自动消失(补丁已被吸收,重排失去意义)",
+        /async function loadGraph[\s\S]{0,700}relayoutChip[\s\S]{0,80}classList\.add\("hidden"\)/.test(ajs));
 
   // 「改」和「换类型」必须彻底分开:upsert 的键是 (circle,a,b,kind),
   // 换 kind 是 INSERT 而旧的还在,聚合会把两条一起算
@@ -705,15 +716,20 @@ console.log("\n手动录入(加人 / 加关系 / 改强度 / 记一笔)");
   const code = ajs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
   /* 选人不能用原生 <select>:iOS 上 100 个 option 是只能盲滚的滚轮。
-     基线从 3 收紧到 1:v7 把 AI 审核里那两个(关系类型 26 项平铺 +
-     强度)换成了收起式的两级 chip,现在全 app 只剩「我是谁」那一个
-     —— 那个是单选一个人、选项就是人名,原生控件反而合适。
-     **这是收紧不是放宽**:留着 3 等于"退回去也能通过",断言就白写了。 */
+     基线再从 1 收紧到 0:最后那个「我是谁」也换成了带搜索的选人卡 ——
+     它不但盲滚,还是打码的漏点(系统渲染的下拉列表不受 🕶 管)。
+     **这是收紧不是放宽**:留着 1 等于"退回去也能通过",断言就白写了。 */
   const selects = (code.match(/<select/g) || []).length;
-  check(`原生 <select> 只剩 ${selects} 个(只该有「我是谁」)`,
-        selects === 1 && /data-plist="\$\{slot\}"/.test(ajs) &&
+  check(`原生 <select> 归零(数到 ${selects} 个)`,
+        selects === 0 && /data-plist="\$\{slot\}"/.test(ajs) &&
         /data-new="1"/.test(ajs),
         "多出来的 <select> 多半是拿它当选人或选关系类型用了");
+  /* 原生 confirm() / prompt() 也归零:风格割裂 + 系统弹窗里的人名不受打码管。
+     只数代码,注释里可以讨论它们。 */
+  check(`原生 confirm() 归零(数到 ${(code.match(/(?<![A-Za-z])confirm\(/g) || []).length} 个)`,
+        (code.match(/(?<![A-Za-z])confirm\(/g) || []).length === 0);
+  check(`原生 prompt() 归零(数到 ${(code.match(/(?<![A-Za-z])prompt\(/g) || []).length} 个)`,
+        (code.match(/(?<![A-Za-z])prompt\(/g) || []).length === 0);
   check("「＋ 新建「XXX」」这一行就是加人入口",
         /data-new/.test(ajs) && /createPersonInline/.test(ajs));
   /* 人物页改成"只建一次、之后只翻 hidden"之后,搜索键预存进了 data-q,
@@ -1645,6 +1661,205 @@ console.log("\n出处可信 + 批量记一笔(v8)");
         /AFFECT = new Set\(\["朋友", "死党"/.test(appjs));
   check("批量表单没有引入新的原生 <select>",
         !/renderBulkForm[\s\S]{0,3000}<select/.test(appjs));
+}
+
+console.log("\n本轮(确定性 bug + 可见反馈 + 界面):要守住的新行为");
+{
+  const html = fs.readFileSync(path.join(__dirname, "web", "index.html"), "utf8");
+
+  /* ---- 手势状态机:捏合抬一指曾把图卡死(mode 停在 pinch,两个
+     touchmove 分支都进不去,必须整只手抬起)。转移表逐格核对。 ---- */
+  const G = GraphRender.gestureNext;
+  const table = [[null, 1, "pan"], [null, 2, "pinch"], ["pan", 2, "pinch"],
+                 ["pinch", 1, "pan"], ["pinch", 0, null], ["pan", 0, null],
+                 ["pinch", 3, "pinch"]];
+  const badT = table.filter(([p, c, w]) => G(p, c) !== w);
+  check(`手势转移表逐格核对(${table.length} 格,错 ${badT.length})`,
+        badT.length === 0, JSON.stringify(badT));
+  check("捏合抬一指后重定基准(touchend 有余指分支调 gestureNext + anchor)",
+        /touchend[\s\S]{0,1600}gestureNext\(mode, e\.touches\.length\)[\s\S]{0,80}anchor\(/.test(gjs));
+  check("touchmove 发现模式与指数不符会自我纠正",
+        /const want = GraphRender\.gestureNext\(mode, e\.touches\.length\)/.test(gjs));
+
+  /* ---- busy / toast 必须盖得住卡片:reparent 进 dialog ---- */
+  check("openSheet 把 #busy/#toast 搬进 dialog(top layer 内才看得见、点得动)",
+        /function openSheet[\s\S]{0,1000}dlg\.append\(\$\("#busy"\), \$\("#toast"\)\)/.test(ajs));
+  check("关卡片时把 busy/toast 物归原处",
+        /addEventListener\("close"[\s\S]{0,800}document\.body\.append\(\$\("#toast"\), \$\("#busy"\)\)/.test(ajs));
+
+  /* ---- 撤销窗口不再被后续 toast 静默吞掉 ---- */
+  check("撤销存活期普通提示排队,不清 undoAction",
+        /function toast\(msg, opts\)[\s\S]{0,300}if \(undoAction && !o\.force\)[\s\S]{0,80}pendingToast/.test(ajs));
+  check("错误消息 force 直出(出错必须当场知道)",
+        /function toastError[\s\S]{0,160}force: true/.test(ajs));
+  check("撤销窗口结束后补发被顶住的那条",
+        /function hideToast[\s\S]{0,400}pendingToast[\s\S]{0,160}toast\(p\.msg/.test(ajs));
+
+  /* ---- AI 审核的监听不再累积(第二次录入选择器失灵的根因) ---- */
+  check("审核卡事件委托挂在随 innerHTML 销毁的 #reviewRoot 上",
+        ajs.includes('<div id="reviewRoot">') &&
+        /const relBody = \$\("#reviewRoot"\)/.test(ajs));
+  check("app.js 里没有挂在常驻 #sheetBody 上的 addEventListener",
+        !/\$\("#sheetBody"\)\.addEventListener/.test(ajs));
+
+  /* ---- 启动失败页 ---- */
+  check("启动失败页走 humanError + 重试按钮(PWA 全屏没有刷新入口)",
+        /boot\(\)\.catch[\s\S]{0,700}humanError\(e\)[\s\S]{0,700}location\.reload/.test(ajs));
+
+  /* ---- 图默认"开口说话":负向/混合标签常显 + LOD 地板 ---- */
+  check("负向/混合边标签默认常显(触屏没有 hover)",
+        /\.eg\.neg \.elabel,\.eg\.mix \.elabel\{opacity:\.95\}/.test(css));
+  check("lod-none 只收走轻微嫌隙的标签(.ekey 例外)",
+        /#svg\.lod-none \.eg\.neg:not\(\.ekey\) \.elabel\{opacity:0\}/.test(css));
+  const em = (w, mixed) => GraphRender.edgeMarkup(
+    { a: 1, b: 2, x1: 0, y1: 0, x2: 10, y2: 0, cx: 5, cy: 2, mx: 5, my: 2,
+      w, width: 1.27, glyph: "●", label: "敌对", count: 1, mixed }, GraphStyles.C);
+  check("ekey 打在混合边和 ≤-2 的深仇上,-1 和正向不打",
+        / ekey/.test(em(-2, false)) && / ekey/.test(em(0, true)) &&
+        !/ ekey/.test(em(-1, false)) && !/ ekey/.test(em(2, false)));
+  const wNeg = +(em(-1, false).match(/stroke-width="([\d.]+)"/) || [])[1];
+  const wPos = +(em(2, false).match(/stroke-width="([\d.]+)"/) || [])[1];
+  check(`负向边有 1.6px 线宽地板(实际 ${wNeg}),正向不跟着加粗(${wPos})`,
+        wNeg >= 1.6 && wPos < 1.6);
+
+  // key2:按 r 前 8 + 「我」,lod-none 下名字仍显示
+  const svgK2 = GraphRender.buildSVG(PL, GraphStyles.A);
+  const gotK2 = new Set([...svgK2.matchAll(/<g class="node[^"]*\bkey2\b[^"]*" data-id="(\d+)"/g)]
+    .map(m => +m[1]));
+  const wantK2 = new Set(PL.nodes.slice().sort((a, b) => b.r - a.r)
+    .slice(0, 8).map(n => n.id));
+  for (const n of PL.nodes) if (n.is_me) wantK2.add(n.id);
+  check(`key2 = 半径前 8 + 「我」(${gotK2.size} 个)`,
+        gotK2.size === wantK2.size && [...wantK2].every(id => gotK2.has(id)),
+        `想要 ${[...wantK2]} 实际 ${[...gotK2]}`);
+  check("样式表里 lod-none 给 key2 放行",
+        /#svg\.lod-none \.node\.key2 \.nm\{display:inline\}/.test(css));
+
+  /* ---- 边命中区恒定屏幕像素 ---- */
+  check("边命中区 calc(28px / var(--gscale))(100 人时不再只剩 6.7px)",
+        /\.edge-hit\{[^}]*calc\(28px \/ var\(--gscale/.test(css));
+
+  /* ---- 触屏「第一下点亮、第二下开卡」 ---- */
+  check("onNode 走 tapNode 分流,桌面 CAN_HOVER 一点即开",
+        /onNode: tapNode/.test(ajs) &&
+        /function tapNode[\s\S]{0,140}CAN_HOVER[\s\S]{0,60}showPerson/.test(ajs));
+  check("再点同一个球才开完整卡片",
+        /peekState\.type === "node" && peekState\.id === pid\) return openFromPeek/.test(ajs));
+  check("GraphView 导出了 CAN_HOVER 和 zoomBy",
+        /zoomBy,\s*\n/.test(gjs) && /CAN_HOVER \};/.test(gjs.replace(/\/\*[\s\S]*?\*\//g, "")));
+  check("空白双击放大有位移与时限判定(300ms / 30px)",
+        /lastTapT/.test(gjs) && /< 300/.test(gjs) && /< 30\)/.test(gjs));
+  /* 空白判定必须把 #stage 里所有浮动控件都排除掉,不只是球和边 ——
+     否则点「＋」缩放会先清掉点亮状态,连按两下还会触发按钮枢轴的双击放大 */
+  check("落在球/边/浮动控件上的轻点不触发 onBlank",
+        gjs.includes('closest(".node,.eg,#gctl,#peek,#relayoutChip'));
+  check("peek 条绑了点击(点它 = 打开完整卡片)",
+        /\$\("#peek"\)\.onclick = openFromPeek/.test(ajs));
+  check("拖球后的 justDragged 在下一次 touchstart 清零(否则空白轻点永久失效)",
+        /touchstart[\s\S]{0,700}justDragged = false;[\s\S]{0,300}gestureNext/.test(gjs) ||
+        /e\.touches\.length === 1\) \{[\s\S]{0,600}justDragged = false/.test(gjs));
+  check("openSheet 能接管退场半路的卡片(sheetClosing 掐断)",
+        /else if \(sheetClosing\) \{[\s\S]{0,600}classList\.remove\("closing"\)/.test(ajs));
+  check("closeSheets 的 animationend 监听判了 sheetClosing 再 close",
+        /if \(sheetClosing\) dlg\.close\(\)/.test(ajs));
+  check("新增写路径(圈子表单/删圈/设我)也上了串行闸",
+        /cfSave"\)\.onclick[\s\S]{0,220}if \(writing\) return/.test(ajs) &&
+        /function dropCircle[\s\S]{0,600}if \(writing\) return/.test(ajs) &&
+        /function openMePicker[\s\S]{0,300}if \(writing\) return/.test(ajs));
+  check("chkwrap 是 <label>(span 不转发点击,44px 热区会是死区)",
+        (ajs.match(/<label class="chkwrap"><input/g) || []).length === 3 &&
+        !/<span class="chkwrap">/.test(ajs));
+  check("keepFailedLines 在 renderSettings 之后调(先写回再重渲染等于白写)",
+        (() => {
+          const seg = ajs.slice(ajs.indexOf('id="rosterCommit"'));
+          const a = seg.indexOf("renderSettings()");
+          const b = seg.indexOf("keepFailedLines(");
+          return a >= 0 && b >= 0 && a < b;
+        })());
+  check("导入预览里的人名/原始行带 blurable",
+        /新建:<span class="blurable">/.test(ajs) &&
+        /class="mono dimtext blurable">\$\{esc\(r\.raw/.test(ajs));
+  check("打码点名 #aiInput(它带 ID,通用规则的特指度压不过)",
+        /body\.masked #aiInput:not\(:focus\)\{color:transparent\}/.test(css));
+  check("lod-none 下聚焦/悬停的点亮赢过负向标签压制(同特指度靠顺序)",
+        css.indexOf("#svg.focused.lod-none .eg.near .elabel") >
+        css.indexOf("#svg.lod-none .eg.neg:not(.ekey) .elabel") &&
+        /#svg\.hovering\.lod-none \.eg\.lit \.elabel/.test(css));
+  check("toast 里打码的 <b> 不带下划线(下划线只留给「撤销」)",
+        /#toast b\.blurable\{text-decoration:none\}/.test(css));
+  check("frontPairs 的按钮包在 hstack 里(::after 热区的 8px 间距前提)",
+        /return btns \? `<div class="hstack wrap">\$\{btns\}<\/div>` : ""/.test(ajs));
+  check("图谱错误态收掉旧图和控件(与空态分支一致)",
+        /catch \(e\) \{[\s\S]{0,700}#gctl"\)\.classList\.add\("hidden"\)[\s\S]{0,400}图谱载入失败/.test(ajs));
+
+  /* ---- 图上控件列 / 重排药丸 / peek 条 ---- */
+  for (const id of ["gctl", "peek", "relayoutChip", "gSearch", "gZoomIn",
+                    "gZoomOut", "gFaction"]) {
+    check(`#${id} 在 index.html 里存在`, html.includes(`id="${id}"`));
+  }
+  check("控件按钮 44×44(--tap)", /\.gctl-btn\{\s*[^}]*width:var\(--tap\)/.test(css));
+  check("派系着色开关两处同步(图上按钮 + 设置页开关走同一个函数)",
+        /function setFactionColoring/.test(ajs) &&
+        /\$\("#facSw"\)\.onchange = e => setFactionColoring/.test(ajs) &&
+        /#gFaction"\)\.onclick = \(\) => setFactionColoring/.test(ajs));
+  check("图上搜索复用通用选人卡(searchKey 单一来源)",
+        /#gSearch"\)\.onclick = \(\) => openPersonPicker\("找人", locateOnGraph\)/.test(ajs));
+
+  /* ---- 错误态有出口 ---- */
+  check("图谱载入失败给重试按钮",
+        /图谱载入失败[\s\S]{0,260}onclick="loadGraph\(\)">重试/.test(ajs));
+  check("局势页失败给重试按钮(并清掉 dataset.key 的拦截)",
+        /id="sitRetry"/.test(ajs) && /box\.dataset\.key = ""; renderSituation\(\)/.test(ajs));
+
+  /* ---- 触摸目标 ---- */
+  check("AI 栏按钮 44×44,发送键与相邻键拉开",
+        /\.ai-btn\{\s*[^}]*width:var\(--tap\)/.test(css) &&
+        /\.ai-btn\.send\{[^}]*margin-left/.test(css));
+  check("顶栏 icon-btn / 卡片 ✕ 用伪元素把热区补到 44",
+        /\.icon-btn::after\{content:"";position:absolute;inset:-2px\}/.test(css) &&
+        /\.sheet \.close::after\{content:"";position:absolute;inset:-6px\}/.test(css));
+  check("AI 审核勾选框有 44 热区包裹(chkwrap),CSS 与两处用法都在",
+        /\.chkwrap\{\s*[^}]*width:var\(--tap\)/.test(css) &&
+        /class="chkwrap"><input type="checkbox" class="pchk"/.test(ajs) &&
+        (ajs.match(/class="chkwrap"><input type="checkbox" class="rchk"/g) || []).length === 2);
+  check("「删」与相邻按钮拉开间距", /\.btn\.mini\.danger\{margin-left/.test(css));
+  check("死代码 .sel-compact 已删", !css.includes(".sel-compact"));
+
+  /* ---- 隐私:首次发送确认 + 空输入禁用 ---- */
+  check("首次 AI 发送有隐私确认(localStorage 记忆,只拦一次)",
+        /function showFirstSendConfirm/.test(ajs) &&
+        /localStorage\.getItem\("aiSendOk"\)\) return showFirstSendConfirm/.test(ajs));
+  check("空输入时发送键禁用",
+        /function paintSendState[\s\S]{0,220}disabled/.test(ajs));
+
+  /* ---- 分析入口:折叠 + 深链 ---- */
+  check("人物卡分析段是折叠块且 summary 带结论(拉拢块默认展开)",
+        /<details class="fold" open>\s*<summary>可以拉拢谁对付他 · \$\{allySum\}/.test(ajs));
+  check("局势页「找帮手」深链到分析段",
+        /gotoPerson\(\$\{r\.id\},'ana'\)/.test(ajs) &&
+        /async function showPerson\(pid, seg\)/.test(ajs));
+  check("「主要矛盾」的对子可点开连线卡",
+        /class="btn mini pairbtn" onclick="showPair\(\$\{p\.a_id\},\$\{p\.b_id\}\)"/.test(ajs));
+
+  /* ---- 打码补漏 ---- */
+  check("打码:输入框失焦后文字不可读(聚焦中保持可读)",
+        /body\.masked \.input:not\(:focus\)/.test(css));
+  check("打码:附件缩略图隐藏",
+        /body\.masked \.filechip img\{visibility:hidden\}/.test(css));
+  check("打码:顶栏圈子名带 blurable",
+        /<span class="nm blurable">\$\{esc\(c \? c\.name : "全部"\)\}/.test(ajs));
+  check("打码:撤销 toast 里的关系类型经 bn()",
+        /toastUndo\(`已删除「\$\{bn\(r\.kind\)\}」`/.test(ajs));
+
+  /* ---- iOS 键盘与底部 ---- */
+  check("软键盘高度写进 --kb(事件驱动),卡片被顶上来",
+        /visualViewport/.test(ajs) && /--kb/.test(ajs) &&
+        /padding-bottom:var\(--kb, 0px\)/.test(css));
+
+  /* ---- 圈子表单化 ---- */
+  check("新建/改名圈子是表单卡(类型 chip 用 circle_kinds,不再三连 prompt)",
+        /function openCircleForm/.test(ajs) && /data-ck/.test(ajs) &&
+        /data-ci/.test(ajs));
 }
 
 console.log("\n" + "=".repeat(52));

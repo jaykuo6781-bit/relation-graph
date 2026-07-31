@@ -617,6 +617,21 @@ const GraphView = (() => {
     apply();
   }
 
+  /* 程序化缩放:＋/− 按钮和空白处双击都走这里。
+     数学与 wheel 的枢轴缩放完全一致(围着一个屏幕点缩,那个点不动),
+     只是枢轴默认取视口中心。钳位范围也必须同一套,否则按钮能缩到
+     捏合回不来的地方。 */
+  function zoomBy(f, px, py) {
+    const r = stage.getBoundingClientRect();
+    const cx = px == null ? r.width / 2 : px;
+    const cy = py == null ? r.height / 2 : py;
+    const ns = Math.max(0.12, Math.min(6, scale * f));
+    tx = cx - (cx - tx) * (ns / scale);
+    ty = cy - (cy - ty) * (ns / scale);
+    scale = ns;
+    apply();
+  }
+
   /* ---------------- 手势 ---------------- */
 
   function bindGestures() {
@@ -643,33 +658,53 @@ const GraphView = (() => {
        但 #stage 已经是 none(更严格),这里只补上 dblclick 的兜底。 */
     stage.addEventListener("dblclick", e => e.preventDefault());
 
-    stage.addEventListener("touchstart", e => {
-      if (e.touches.length === 1) {
-        mode = "pan"; moved = false;
-        sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+    /* 手势模式的基准值。**每次模式切换都要重定**:pan 的基准是起点坐标,
+       pinch 的基准是起始指距和枢轴 —— 用上一个模式留下的基准接着算,
+       画面会瞬间跳一下。 */
+    const anchor = (m, touches) => {
+      if (m === "pan" && touches[0]) {
+        sx = touches[0].clientX; sy = touches[0].clientY;
         stx = tx; sty = ty;
-      } else if (e.touches.length === 2) {
-        mode = "pinch"; moved = true;
-        sdist = dist(e.touches[0], e.touches[1]) || 1;
+      } else if (m === "pinch" && touches[1]) {
+        sdist = dist(touches[0], touches[1]) || 1;
         sscale = scale;
         const r = stage.getBoundingClientRect();
         pivot = {
-          x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-          y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
+          x: (touches[0].clientX + touches[1].clientX) / 2 - r.left,
+          y: (touches[0].clientY + touches[1].clientY) / 2 - r.top,
         };
         stx = tx; sty = ty;
       }
+    };
+
+    stage.addEventListener("touchstart", e => {
+      const next = GraphRender.gestureNext(mode, e.touches.length);
+      if (e.touches.length === 1) {
+        moved = false;
+        /* 上一次拖球留下的旗子在这里清:拖动后浏览器不派发 click,
+           唯一会消费它的 node click 分支不执行,旗子会永久卡住 ——
+           后果是此后所有空白轻点(清 peek、双击放大)静默失效。
+           新手势开始时它就没有存在的意义了;而"拖完别弹卡"的场景里,
+           click 在上一次 touchend 之后、这一次 touchstart 之前早就派发完了。 */
+        justDragged = false;
+      } else moved = true;
+      mode = next;
+      anchor(mode, e.touches);
     }, { passive: true });
 
     stage.addEventListener("touchmove", e => {
       // 正在拖球 —— 这一指属于那个球,画布不要跟着跑
       if (dragId != null) { e.preventDefault(); return; }
+      /* 兜底:第二根手指落在图外的元素上时,stage 的 touchstart 收不到,
+         mode 会和真实指数对不上 —— 在这里按指数纠正并重定基准。 */
+      const want = GraphRender.gestureNext(mode, e.touches.length);
+      if (want !== mode) { mode = want; moved = true; anchor(mode, e.touches); }
       if (mode === "pan" && e.touches.length === 1) {
         const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
         if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
         tx = stx + dx; ty = sty + dy;
         apply();
-      } else if (mode === "pinch" && e.touches.length === 2) {
+      } else if (mode === "pinch" && e.touches.length >= 2) {
         const ns = Math.max(0.12, Math.min(6,
           sscale * (dist(e.touches[0], e.touches[1]) / sdist)));
         tx = pivot.x - (pivot.x - stx) * (ns / sscale);
@@ -680,11 +715,41 @@ const GraphView = (() => {
       e.preventDefault();
     }, { passive: false });
 
+    // 空白处双击放大的判定状态(300ms 内两次、位移 <30px)
+    let lastTapT = 0, lastTapX = 0, lastTapY = 0;
+
     stage.addEventListener("touchend", e => {
       if (e.touches.length === 0) {
-        if (mode === "pan" && !moved && !justDragged && dragId == null
-            && cb.onBlank) cb.onBlank();
+        /* 只有真落在空白处的轻点才算「点空白」:触摸事件的 target 是
+           手指**落下时**的元素。要排除的不只是球和边 —— #stage 里还浮着
+           peek 条、控件列、重排药丸、空态按钮,它们的轻点也会冒泡到这里;
+           不排除的话,点「＋」放大会先把点亮状态清掉,连按两下还会
+           触发以按钮为枢轴的双击放大。 */
+        const t = e.changedTouches && e.changedTouches[0];
+        const onBlank = t && !(e.target.closest &&
+          e.target.closest(".node,.eg,#gctl,#peek,#relayoutChip,#graphEmpty,#aibar"));
+        if (mode === "pan" && !moved && !justDragged && dragId == null && onBlank) {
+          const r = stage.getBoundingClientRect();
+          const x = t.clientX - r.left, y = t.clientY - r.top;
+          /* iOS 上页面级双击缩放被 dblclick 的 preventDefault 拦掉了(见上),
+             图自己的双击放大在这里自判 —— 手机上除捏合外唯一的放大手段。 */
+          if (now() - lastTapT < 300 &&
+              Math.hypot(x - lastTapX, y - lastTapY) < 30) {
+            lastTapT = 0;
+            zoomBy(1.6, x, y);
+          } else {
+            lastTapT = now(); lastTapX = x; lastTapY = y;
+            if (cb.onBlank) cb.onBlank();
+          }
+        }
         mode = null;
+      } else {
+        /* 捏合抬起一根手指 → 剩下那根接着平移;这里不重定基准的话
+           mode 会卡在 pinch,touchmove 两个分支都进不去,图就"死"了 ——
+           必须整只手抬起再来。这是真机上抓到过的卡死。 */
+        mode = GraphRender.gestureNext(mode, e.touches.length);
+        anchor(mode, e.touches);
+        moved = true;
       }
     });
 
@@ -748,7 +813,12 @@ const GraphView = (() => {
   }
 
   return { init, render, fit, focus, focusEdge, centerOn, nodeColor,
-           setFactionMode, setStyle, resetPositions, upsertEdge, removeEdge };
+           setFactionMode, setStyle, resetPositions, upsertEdge, removeEdge,
+           zoomBy,
+           /* 触屏上「第一下点亮、第二下开卡」还是「一点即开」由 app.js 决定,
+              判定依据必须和这里"绑不绑 hover"是同一个 —— 所以导出同一个常量,
+              不让 app.js 自己再查一遍 matchMedia(两处查询迟早不一致)。 */
+           CAN_HOVER };
 })();
 
 
@@ -1007,16 +1077,33 @@ const GraphRender = (() => {
       ? `url(#${P}e${e.a}_${e.b})` : `var(${solid})`;
     // 混合边和负向边一样要压过正向边的视觉权重 —— 它们是"值得看的地方"
     const op = (neg || mix) ? Math.min(1, style.edgeOp * 1.4) : style.edgeOp;
-    const cls = mix ? "mix" : (neg ? "neg" : "pos");
+    /* 负向 / 混合边再给一道最低线宽:-1 的边按公式只有 1.27×edgeW,
+       缩小后细得和正向边分不开 —— 而"矛盾"是这张图上最该跳出来的信息。
+       只加强负向侧,正向边保持原样(全加粗等于没加粗)。 */
+    const w0 = e.width * style.edgeW;
+    const wpx = (neg || mix) ? Math.max(1.6, w0) : w0;
+    /* .ekey = 缩到最小档(lod-none)时标签仍然常显的边:混合边全部、
+       负向 ≤ -2(深仇)。-1 的轻微嫌隙在那个档退场,防止 100 人时压字。
+       这只是一个 class,显不显示由 style.css 的层叠决定,JS 不做循环。 */
+    const key = (mix || (neg && e.w <= -2)) ? " ekey" : "";
+    const cls = (mix ? "mix" : (neg ? "neg" : "pos")) + key;
     return `<g class="eg ${cls}" data-a="${e.a}" data-b="${e.b}">` +
       `<path class="edge" d="${d}" stroke="${stroke}" ` +
-        `stroke-width="${(e.width * style.edgeW).toFixed(2)}" ` +
+        `stroke-width="${wpx.toFixed(2)}" ` +
         `opacity="${op.toFixed(2)}"${neg ? ' stroke-dasharray="7 6"' : ""}/>` +
       `<path class="edge-hit" d="${d}"/>` +
       `<text class="elabel" x="${e.mx}" y="${e.my - 11}">` +
         `${esc(e.glyph)} ${esc(e.label)}` +
         (e.count > 1 ? ` +${e.count - 1}` : "") + `</text>` +
       `</g>`;
+  }
+
+  /* 触摸手势的模式转移:指数决定模式,纯函数,fittest 里逐格核对转移表。
+     调用方在**每次转移后必须重定基准**(anchor),否则画面会跳。 */
+  function gestureNext(prev, touchCount) {
+    if (touchCount === 0) return null;
+    if (touchCount === 1) return "pan";
+    return "pinch";
   }
 
   /* ---------------- 增量补丁要用的纯计算 ----------------
@@ -1145,6 +1232,14 @@ const GraphRender = (() => {
     for (const e of payload.edges) out.push(edgeMarkup(e, style, P));
     out.push("</g>");
 
+    /* LOD 最低档的地板:100 人复位时缩放约 0.26,lod-none 下一个名字都不显示,
+       图只剩一片首字 —— "一眼看明白"就落空了。按重要度(服务端算好的半径 n.r)
+       取前 8 名加「我」打上 key2,CSS 让他们在 lod-none 下仍显示名字。
+       一次 O(n log n) 排序,只在换数据时跑,不碰逐帧路径。 */
+    const byR = payload.nodes.slice().sort((a, b) => b.r - a.r);
+    const key2 = new Set(byR.slice(0, 8).map(n => n.id));
+    for (const n of payload.nodes) if (n.is_me) key2.add(n.id);
+
     out.push('<g class="nodes">');
     for (const n of payload.nodes) {
       const r = n.r * style.ball;
@@ -1155,6 +1250,7 @@ const GraphRender = (() => {
          JS 一次都不用去遍历这些节点。 */
       out.push(
         `<g class="node ${n.is_me ? "me " : ""}${n.key ? "key " : ""}` +
+        `${key2.has(n.id) ? "key2 " : ""}` +
         `fac-${fac}" data-id="${n.id}">` +
         `<circle class="glow" cx="${n.x}" cy="${n.y}" ` +
           `r="${(r * style.glow).toFixed(1)}" fill="url(#${P}glow_${pal})" ` +
@@ -1181,6 +1277,6 @@ const GraphRender = (() => {
 
   return { buildSVG, esc, computeFit, arc, curveCap, labelHalfPx,
            edgeMarkup, streakDef, pairAggregate, pairKey, edgeFromPair,
-           lodRatio, lodLevel, effectiveStyle,
+           lodRatio, lodLevel, effectiveStyle, gestureNext,
            STAR_CAP, STREAK_MAX_EDGES, LOD_NN_FACTOR, LOD_HYST };
 })();

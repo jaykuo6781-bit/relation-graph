@@ -15,7 +15,8 @@ const S = {
   graphLoaded: false,
   files: [],             // AI 输入栏里待发送的附件
   pair: null,            // 连线卡当前展示的那一对(删除/改强度要拿原始行)
-  patched: false,        // 图上有过增量补丁 → 复位键变成"重新排布"
+  person: null,          // 人物卡当前展示的人(删除确认要用他的关系/事件数)
+  patched: false,        // 图上有过增量补丁 → 图上浮出「重新排布」药丸
 };
 
 const STRENGTH_LABEL = {
@@ -95,31 +96,51 @@ function searchKey(p) {
 
 let toastTimer;
 let undoAction = null;          // 「撤销」toast 上挂着的那个动作
+let pendingToast = null;        // 撤销窗口期被顶住的普通提示(容量 1,后到覆盖先到)
 
-/* 非模态 show():同样进 top layer(所以能盖住 showModal 的卡片),
-   但不抢焦点、不加遮罩、不拦背后的点击。重复 show() 会抛,先判 open。 */
+/* 打码开关管不到 toast 里的真名(「已删除「情敌」」本身就敏感)——
+   拼 HTML 的调用方用它把人名/关系类型包进 blurable。 */
+function bn(s) {
+  return `<b class="blurable">${esc(s)}</b>`;
+}
+
+/* 非模态 show():**不进 top layer**(top layer 只收 showModal 和 popover)。
+   卡片开着时它能被看见,靠的是 openSheet 把它搬进了 dialog 里当子元素。
+   重复 show() 会抛,先判 open。 */
 function showToast(t) {
   if (!t.open) { try { t.show(); } catch (e) { t.setAttribute("open", ""); } }
 }
 
-function toast(msg) {
+/* opts.html:msg 是调用方拼好的 HTML(esc 过,为了给人名套 blurable)。
+   opts.force:错误消息专用 —— 撤销窗口开着也立刻顶掉它(出错必须当场知道)。
+   普通提示在撤销窗口存活期**排队等**而不是顶掉:以前这里第一行就
+   undoAction = null,删完关系随手一个别的提示,「撤销」就无声消失了。 */
+function toast(msg, opts) {
+  const o = opts || {};
+  if (undoAction && !o.force) { pendingToast = { msg, opts: o }; return; }
   const t = $("#toast");
-  undoAction = null;            // 新提示盖掉旧提示,旧的撤销机会一并作废
-  t.textContent = msg;
+  undoAction = null;
+  if (o.html) t.innerHTML = msg; else t.textContent = msg;
   t.style.cursor = "";
   showToast(t);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(hideToast, 2600);
 }
 
+/* 错误一律走这里:翻成人话 + force(不排队) */
+function toastError(e, label) {
+  toast(humanError(e, label), { force: true });
+}
+
 /* 删除不再弹 confirm,改成「已删除 · 撤销」。
    个人应用里 undo 比二次确认既好用又更安全 —— 二次确认只是把"确定吗"
    往前挪一步,点错了照样没了;撤销是真的能拿回来。
-   整条 toast 都是热区(手机上不必去戳那两个字),窗口给到 5.2 秒。 */
-function toastUndo(msg, undo) {
+   整条 toast 都是热区(手机上不必去戳那两个字),窗口给到 5.2 秒。
+   html 参数是调用方拼好的 HTML(人名已 esc + blurable)。 */
+function toastUndo(html, undo) {
   const t = $("#toast");
   undoAction = undo;
-  t.innerHTML = `${esc(msg)} · <b>撤销</b>`;
+  t.innerHTML = `${html} · <b>撤销</b>`;
   t.style.cursor = "pointer";
   showToast(t);
   clearTimeout(toastTimer);
@@ -130,6 +151,11 @@ function hideToast() {
   undoAction = null;
   const t = $("#toast");
   if (t.open) t.close(); else t.removeAttribute("open");
+  if (pendingToast) {           // 撤销窗口结束,把被顶住的那条补出来
+    const p = pendingToast;
+    pendingToast = null;
+    toast(p.msg, p.opts);
+  }
 }
 
 /* 把一个 async 事件处理器包起来,失败时给出人话提示。
@@ -143,7 +169,7 @@ function guard(fn, label) {
       return await fn(...args);
     } catch (e) {
       busy(false);
-      toast(humanError(e, label));
+      toastError(e, label);
     }
   };
 }
@@ -248,7 +274,7 @@ async function boot() {
   // 兜底:任何漏了 guard 的地方也不会再静默失败
   window.addEventListener("unhandledrejection", ev => {
     busy(false);
-    toast(humanError(ev.reason));
+    toastError(ev.reason);
     ev.preventDefault();
   });
 
@@ -257,10 +283,12 @@ async function boot() {
      localStorage 里的 gstyle 只剩下"手工改一下试试"的用途,留着不碍事;
      B / C 还在 GraphStyles 里,但只作为 fittest 的测试基准。 */
   GraphView.setStyle(GraphStyles[localStorage.getItem("gstyle") || "A"]);
+  // 触屏「第一下点亮、第二下开卡」;桌面(有 hover)保持一点即开。
+  // 分流在 tapNode / tapEdge 里做,依据是 GraphView.CAN_HOVER。
   GraphView.init({
-    onNode: showPerson,
-    onEdge: showPair,
-    onBlank: closeSheets,
+    onNode: tapNode,
+    onEdge: tapEdge,
+    onBlank: blankTap,
   });
 
   document.querySelectorAll(".navbtn").forEach(b => {
@@ -288,26 +316,46 @@ async function boot() {
   });
 
   /* 复位 = 把拖过的球放回算法排的位置(拖动本就不持久化)+ 重新贴合视口。
-     另外它还是**重新排布的显式出口**:手动加过关系之后图上是增量补丁
-     (只多了一条线,球一个没动),想让算法按新关系重新摆一次就点这里。
-     绝不在保存后偷偷重排 —— 用户刚录完一条,最想看的是那条线出现在哪,
-     不是满屏重新洗牌。 */
+     **单一语义**:它不再兼任"重新排布"—— 以前 S.patched 时同一颗按钮
+     悄悄变成整图重排,外观毫无区别,点之前无从知道这次会不会满屏洗牌。
+     重排现在走图上那颗显式的 #relayoutChip 药丸(见 syncPairEdge)。
+     绝不在保存后偷偷重排 —— 用户刚录完一条,最想看的是那条线出现在哪。 */
   $("#fitBtn").onclick = () => {
     closeSheets();
     const restored = GraphView.resetPositions();
-    if (S.patched) {
-      S.patched = false;
-      S.graphLoaded = false;
-      loadGraph();                       // 里面会重新贴合
-      toast("已按新关系重新排布");
-      return;
-    }
     GraphView.fit(bottomInset());
     if (restored) toast("已放回原来的位置");
   };
+  // 重排药丸:手动加关系后浮现(syncPairEdge 置 S.patched),点了才重排
+  $("#relayoutChip").onclick = () => {
+    $("#relayoutChip").classList.add("hidden");
+    S.patched = false;
+    S.graphLoaded = false;
+    loadGraph();                         // 里面会重新贴合
+    toast("已按新关系重新排布");
+  };
   $("#themeBtn").onclick = toggleTheme;
-  // 派系着色的开关已挪到设置页(见 renderSettings 的「外观」卡片)
   S.byFaction = !!localStorage.getItem("byFaction");
+
+  // peek 条整条是热区:点它 = 打开完整卡片(paintPeek 里的「看详情 ›」)
+  $("#peek").onclick = openFromPeek;
+  // 图上的浮动控件列:搜索 / 放大 / 缩小 / 派系着色
+  $("#gSearch").onclick = () => openPersonPicker("找人", locateOnGraph);
+  $("#gZoomIn").onclick = () => GraphView.zoomBy(1.35);
+  $("#gZoomOut").onclick = () => GraphView.zoomBy(1 / 1.35);
+  $("#gFaction").onclick = () => setFactionColoring(!S.byFaction);
+  paintFactionBtn();
+
+  /* 软键盘高度写进 --kb(事件驱动,一次键盘收放约十次回调,不是逐帧):
+     卡片里的输入框聚焦时整张卡被顶到键盘上方,不再被压住。 */
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const updKb = () => {
+      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty("--kb", kb.toFixed(0) + "px");
+    };
+    vv.addEventListener("resize", updKb);
+  }
 
   // 窗口尺寸变了可能跨到另一个画布档位,重新取一次
   let rz;
@@ -358,6 +406,7 @@ async function refresh() {
 function switchView(name) {
   S.view = name;
   closeSheets();
+  if (name !== "graph") clearPeek();   // 带着聚焦切走,回来会是一张发暗的图
   document.querySelectorAll(".view").forEach(v => v.classList.add("hidden"));
   $("#view-" + name).classList.remove("hidden");
   document.querySelectorAll(".navbtn").forEach(b => {
@@ -380,9 +429,10 @@ function switchView(name) {
 
 function paintCircleBtn() {
   const c = S.circle;
+  // 圈子名也要能打码 —— 圈子叫「前任们」的时候它就是人名级的敏感信息
   $("#circleBtn").innerHTML =
     `<span class="ico">${esc(c ? c.icon || "🌐" : "🌐")}</span>` +
-    `<span class="nm">${esc(c ? c.name : "全部")}</span>` +
+    `<span class="nm blurable">${esc(c ? c.name : "全部")}</span>` +
     `<svg class="ic sm caret" aria-hidden="true"><use href="#i-caret"/></svg>`;
 }
 
@@ -401,7 +451,7 @@ function toggleCircleMenu(e) {
       <button class="cmenu-item ${S.circle && c.id === S.circle.id ? "on" : ""}"
               data-cid="${c.id}">
         <span class="ico">${esc(c.icon || "🌐")}</span>
-        <span>${esc(c.name)}</span>
+        <span class="blurable">${esc(c.name)}</span>
         <span class="sub">${c.people} 人 · ${c.relations} 条</span>
       </button>`).join("") +
     `<div class="cmenu-sep"></div>
@@ -419,7 +469,7 @@ function toggleCircleMenu(e) {
     };
   });
   m.querySelector('[data-act="new"]').onclick = () => {
-    setCircleMenuOpen(false); newCircle();
+    setCircleMenuOpen(false); openCircleForm();
   };
   m.querySelector('[data-act="manage"]').onclick = () => {
     setCircleMenuOpen(false); switchView("settings");
@@ -439,33 +489,108 @@ async function switchCircle(cid) {
   if (S.view === "people") renderPeople();
 }
 
-async function newCircle() {
-  const name = prompt("新圈子叫什么?(比如:公司圈、同学圈、老家亲戚)");
-  if (!name) return;
-  const kinds = Object.keys(S.state.circle_kinds);
-  const kind = prompt(`类型?可选:${kinds.join(" / ")}\n(决定优先推荐哪些关系类型)`,
-                      "自定义") || "自定义";
-  const icon = prompt("给它个图标(一个 emoji,可留空)", "🌐") || "🌐";
-  const r = await api("/api/circles", { name, kind, icon });
-  await refresh();
-  await switchCircle(r.id);
-  toast("圈子建好了");
+/* 建圈子 / 改圈子名。以前是**连续三个原生 prompt()**:类型要照着提示抄
+   一个中文词、拼错静默退化、没法回头改,还和全应用的卡片风格割裂。
+   现在是一张表单卡:类型 chip 单选(circle_kinds 的键,正是"为这件事
+   造的字段"),图标 12 宫格 + 自由输入。传 cid = 编辑态(API 只改名字,
+   类型锁定并注明)。 */
+function openCircleForm(cid) {
+  const c = cid ? S.state.circles.find(x => x.id === cid) : null;
+  const kindList = [...new Set([...Object.keys(S.state.circle_kinds || {}), "自定义"])];
+  const EMOJI = ["🌐", "🏢", "🎓", "🏠", "🍻", "💼", "⚽", "🎮", "💃", "🧧", "✈️", "🎤"];
+  let kind = c ? c.kind : (kindList[0] || "自定义");
+  let icon = c ? (c.icon || "🌐") : "🌐";
+
+  openSheet(`
+    <h3>${c ? "改圈子" : "新建圈子"}</h3>
+    <label>名字</label>
+    <input class="input" id="cfName" autocomplete="off"
+           placeholder="公司圈、同学圈、老家亲戚…" value="${esc(c ? c.name : "")}">
+    ${c ? `<div class="hint">类型(${esc(c.kind)})建好后不可改 ——
+        它决定录关系时优先推荐哪些类型。</div>` : `
+    <label>类型(决定优先推荐哪些关系类型)</label>
+    <div class="hstack wrap" id="cfKinds">${kindList.map(k =>
+      chip("data-ck", k, esc(k), k === kind)).join("")}</div>
+    <label>图标</label>
+    <div class="hstack wrap" id="cfIcons">${EMOJI.map(e =>
+      chip("data-ci", e, e, e === icon)).join("")}</div>
+    <input class="input" id="cfIconFree" autocomplete="off" maxlength="4"
+           placeholder="或者自己打一个 emoji" style="margin-top:var(--sp-1)">`}
+    <div class="btn-row">
+      <button class="btn primary" id="cfSave">${c ? "保存" : "建好"}</button>
+      <button class="btn" onclick="closeSheets()">取消</button>
+    </div>`, c ? "改圈子" : "新建圈子");
+
+  // chip 单选:只翻高亮类,不重建表单(输入框里打了一半的名字不能丢)
+  const paintChips = () => {
+    document.querySelectorAll("#cfKinds [data-ck]").forEach(b =>
+      b.classList.toggle("primary", b.dataset.ck === kind));
+    document.querySelectorAll("#cfIcons [data-ci]").forEach(b =>
+      b.classList.toggle("primary", b.dataset.ci === icon));
+  };
+  document.querySelectorAll("#cfKinds [data-ck]").forEach(b =>
+    b.onclick = () => { kind = b.dataset.ck; paintChips(); });
+  document.querySelectorAll("#cfIcons [data-ci]").forEach(b =>
+    b.onclick = () => {
+      icon = b.dataset.ci;
+      const free = $("#cfIconFree");
+      if (free) free.value = "";
+      paintChips();
+    });
+
+  // 写路径必须上串行闸(见 writing 的注释:防的是并发事务,不是手抖)
+  $("#cfSave").onclick = guard(async () => {
+    const name = $("#cfName").value.trim();
+    if (!name) return toast("先给圈子起个名字");
+    if (writing) return;
+    writing = true;
+    busy(true, "写入中…");
+    try {
+      if (c) {
+        if (name !== c.name) {
+          await api("/api/circles", { id: c.id, name });
+          await refresh(); paintCircleBtn();
+        }
+        busy(false);
+        closeSheets();
+        renderSettings();
+        toast("已改名");
+        return;
+      }
+      const free = ($("#cfIconFree") ? $("#cfIconFree").value : "").trim();
+      const r = await api("/api/circles", { name, kind, icon: free || icon });
+      busy(false);
+      closeSheets();
+      await refresh();
+      await switchCircle(r.id);
+      toast("圈子建好了");
+    } finally { writing = false; busy(false); }
+  }, "保存圈子失败");
 }
 
 /* ---------------- 图谱 ---------------- */
 
 async function loadGraph() {
+  const empty = $("#graphEmpty");
+  // 空态的默认内容留一份底:错误态会改写它,恢复时要能换回来
+  if (!empty.dataset.orig) empty.dataset.orig = empty.innerHTML;
   try {
     const g = await api(`/api/graph?${cq()}&aspect=${viewAspect()}`);
-    const empty = $("#graphEmpty");
+    // 全量重载后增量补丁已被吸收,重排药丸没有存在的理由了
+    S.patched = false;
+    $("#relayoutChip").classList.add("hidden");
+    hidePeek();
     if (!g.nodes.length) {
+      empty.innerHTML = empty.dataset.orig;
       empty.classList.remove("hidden");
       $("#legend").classList.add("hidden");
+      $("#gctl").classList.add("hidden");
       document.getElementById("svg").innerHTML = "";
       return;
     }
     empty.classList.add("hidden");
     $("#legend").classList.remove("hidden");
+    $("#gctl").classList.remove("hidden");
     GraphView.render(g);
     GraphView.setFactionMode(S.byFaction);
     S.graph = g;
@@ -473,8 +598,39 @@ async function loadGraph() {
     S.graphLoaded = true;
     paintLegend();
   } catch (e) {
-    toast(e.message);
+    /* 只 toast 的话,2.6 秒后提示消失,舞台上剩一片空白/旧图,没有出口。
+       把空态改写成错误 + 重试按钮 —— 尤其是手机短暂断连(出电梯、切网络)
+       这种一试就好的情形。收掉旧图和控件,与空态分支同一套行为:
+       错误文字压在旧图上读不清,对着失败态的放大/搜索键也没有意义。 */
+    document.getElementById("svg").innerHTML = "";
+    S.graphLoaded = false;
+    $("#legend").classList.add("hidden");
+    $("#gctl").classList.add("hidden");
+    empty.innerHTML = `
+      <h3>图谱载入失败</h3>
+      <p style="margin:0">${esc(humanError(e))}</p>
+      <button class="btn" onclick="loadGraph()">重试</button>`;
+    empty.classList.remove("hidden");
   }
+}
+
+/* 派系着色:图上的 🎨 按钮和设置页的开关是同一个状态的两个入口,
+   全部汇到这里,谁翻的都会同步另一处。 */
+function setFactionColoring(on) {
+  S.byFaction = !!on;
+  localStorage.setItem("byFaction", S.byFaction ? "1" : "");
+  GraphView.setFactionMode(S.byFaction);
+  paintLegend();
+  paintFactionBtn();
+  const sw = $("#facSw");
+  if (sw) sw.checked = S.byFaction;
+}
+
+function paintFactionBtn() {
+  const b = $("#gFaction");
+  if (!b) return;
+  b.classList.toggle("on", S.byFaction);
+  b.setAttribute("aria-pressed", S.byFaction ? "true" : "false");
 }
 
 function paintLegend() {
@@ -490,6 +646,152 @@ function paintLegend() {
                  : `<span class="k">节点亮度 = 重要程度</span>`);
 }
 
+/* ============================================================
+   触屏「第一下点亮、第二下开卡」
+   ============================================================
+
+   以前触屏上点球直接弹全屏卡片,把图挡住 —— 电脑上悬停就能"扫一眼
+   谁连着谁",手机上这个动作根本不存在。现在:
+     第一下 → 只聚焦(他和邻居全亮、关系文字浮出),底部出一条 peek;
+     再点同一个球 / 点 peek 条 → 才打开完整卡片;
+     点空白 → 清聚焦收 peek。
+   桌面(CAN_HOVER)保持一点即开 —— 悬停已经承担了"扫一眼"。
+   判定用 GraphView.CAN_HOVER,和"绑不绑 hover"是同一个常量。 */
+
+const peekState = { type: null, id: 0, a: 0, b: 0 };
+
+function hidePeek() {
+  peekState.type = null;
+  const el = $("#peek");
+  if (el) el.classList.add("hidden");
+  const lg = $("#legend");
+  if (lg) lg.style.opacity = "";
+}
+
+function clearPeek() {
+  hidePeek();
+  GraphView.focus(null);
+}
+
+function openFromPeek() {
+  const st = { ...peekState };
+  hidePeek();
+  if (st.type === "node") showPerson(st.id);
+  else if (st.type === "edge") showPair(st.a, st.b);
+}
+
+function paintPeek() {
+  const el = $("#peek");
+  if (!el) return;
+  let html = "";
+  if (peekState.type === "node") {
+    const p = personById(peekState.id) || {};
+    const deg = S.graph
+      ? S.graph.edges.filter(e => e.a === peekState.id || e.b === peekState.id).length
+      : 0;
+    const meta = [p.dept, p.title].filter(Boolean).join(" ");
+    html =
+      `<span class="dot" style="background:${GraphView.nodeColor(peekState.id)}"></span>` +
+      `<span class="pk-main"><b class="blurable">${esc(p.name || "?")}</b>` +
+      `<span class="pk-meta blurable">${esc(meta || "—")} · ${deg} 条关系</span></span>` +
+      `<span class="pk-go">看详情 ›</span>`;
+  } else if (peekState.type === "edge") {
+    const pa = personById(peekState.a) || {}, pb = personById(peekState.b) || {};
+    const e = (S.graph ? S.graph.edges : []).find(x =>
+      x.a === peekState.a && x.b === peekState.b);
+    const rel = e ? `${e.glyph || ""} ${e.label || ""}${e.count > 1 ? ` +${e.count - 1}` : ""}` : "";
+    html =
+      `<span class="pk-main"><b class="blurable">${esc(pa.name || "?")} — ${esc(pb.name || "?")}</b>` +
+      `<span class="pk-meta blurable">${esc(rel.trim() || "关系")}</span></span>` +
+      `<span class="pk-go">看详情 ›</span>`;
+  } else return;
+  el.innerHTML = html;
+  el.classList.remove("hidden");
+  // peek 和图例同锚点,出现时图例淡出让位(opacity 走 GPU,不动布局)
+  const lg = $("#legend");
+  if (lg) lg.style.opacity = "0";
+}
+
+function tapNode(pid) {
+  if (GraphView.CAN_HOVER) return showPerson(pid);
+  if (peekState.type === "node" && peekState.id === pid) return openFromPeek();
+  peekState.type = "node"; peekState.id = pid;
+  GraphView.focus(pid);
+  paintPeek();
+}
+
+function tapEdge(a, b) {
+  if (GraphView.CAN_HOVER) return showPair(a, b);
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  if (peekState.type === "edge" && peekState.a === lo && peekState.b === hi)
+    return openFromPeek();
+  peekState.type = "edge"; peekState.a = lo; peekState.b = hi;
+  GraphView.focusEdge(a, b);
+  paintPeek();
+}
+
+function blankTap() {
+  if (peekState.type) return clearPeek();
+  closeSheets();
+}
+
+/* 等卡片真正关完再定位/聚焦 —— closeSheets 走 160ms 退场动画,close 事件
+   里还会 GraphView.focus(null) + hidePeek,过早设置的聚焦会被它清掉。 */
+function afterSheetClosed(fn) {
+  const dlg = $("#sheet");
+  if (!dlg || !dlg.open) return fn();
+  dlg.addEventListener("close", () => setTimeout(fn, 30), { once: true });
+  closeSheets();
+}
+
+/* 图上的搜索:选中后关卡片、把他居中并点亮(触屏出 peek,再点开卡) */
+function locateOnGraph(pid) {
+  afterSheetClosed(() => {
+    switchView("graph");
+    setTimeout(() => {
+      GraphView.centerOn(pid, bottomInset() + 120);
+      GraphView.focus(pid);
+      if (!GraphView.CAN_HOVER) {
+        peekState.type = "node"; peekState.id = pid;
+        paintPeek();
+      }
+    }, 60);
+  });
+}
+
+/* 通用的搜索选人卡(图上搜索、设置页「我是谁」共用)。
+   搜索框只绑 oninput 重画**列表**,不重建搜索框 —— 中文输入法正在拼的
+   那一半不能被打断;列表逻辑与 paintPickList 同一套(searchKey 单一来源)。 */
+function openPersonPicker(title, onPick) {
+  openSheet(`
+    <h3>${esc(title)}</h3>
+    <input class="input" id="ppQ" placeholder="搜姓名 / 部门 / 职位"
+           autocomplete="off">
+    <div class="list" id="ppList" style="margin-top:var(--sp-2)"></div>`, title);
+  const paint = () => {
+    const q = ($("#ppQ").value || "").trim().toLowerCase();
+    let list = S.people.filter(p => !q || searchKey(p).includes(q));
+    if (!q) list = list.slice()
+      .sort((x, y) => (y.updated_at || 0) - (x.updated_at || 0));
+    $("#ppList").innerHTML = list.slice(0, 60).map(p => `
+      <div class="row" data-pid="${p.id}">
+        ${avatar(p.id, p.name, "sm")}
+        <div class="main">
+          <div class="nm blurable">${esc(p.name)}${
+            p.is_me ? ' <span class="tag">我</span>' : ""}</div>
+          <div class="meta blurable">${esc(p.dept || "—")} ${esc(p.title || "")}</div>
+        </div>
+      </div>`).join("") ||
+      '<div class="dimtext empty-line">没有匹配的人</div>';
+  };
+  $("#ppQ").oninput = paint;
+  $("#ppList").onclick = e => {
+    const row = e.target.closest("[data-pid]");
+    if (row) onPick(+row.dataset.pid);
+  };
+  paint();
+}
+
 /* ---------------- 卡片:统一的开关 ----------------
    所有关闭路径(✕ / Esc / 点遮罩 / 下拉 / onBlank)最终都汇到 dialog 的
    close 事件,清理逻辑因此只写一份。 */
@@ -502,6 +804,13 @@ function openSheet(html, label) {
   body.innerHTML = html;
   bindSegs(body);
   if (label) dlg.setAttribute("aria-label", label);
+  /* busy 遮罩和 toast 都是普通层级的元素,而 showModal() 的卡片在 top layer,
+     z-index 再高也压不过 —— 「写入中…」和「已删除 · 撤销」在卡片场景下
+     根本看不见(真机确认过)。把它们搬进 dialog 当子元素:dialog 的子孙
+     不 inert、又跟着待在 top layer 里,既看得见也点得动。
+     关卡片时 bindSheet 的 close 处理器负责搬回 body。
+     顺序:busy 在前 toast 在后,busy 自带 z-index:90,盖在卡片和 toast 上。 */
+  dlg.append($("#busy"), $("#toast"));
   if (!dlg.open) {
     // showModal() 对已经打开的 dialog 会抛 InvalidStateError,
     // 而"人物卡里点一条关系 → 打开连线卡"正是在已开状态下调的
@@ -510,6 +819,16 @@ function openSheet(html, label) {
     const card0 = dlg.querySelector(".sheet-card");
     if (card0) card0.style.transform = "";
     dlg.showModal();
+  } else if (sheetClosing) {
+    /* 160ms 退场动画进行到一半又要开新卡(比如点 ✕ 后紧接着点了
+       「删除此人」):不掐掉退场的话,animationend 的 close 会把刚写进去的
+       新内容清空,确认卡一闪而没。掐:摘掉 closing(动画被取消,只会派发
+       animationcancel),sheetClosing 归位;closeSheets 挂的那个 once 监听
+       里判了 sheetClosing,空跑一次无害。 */
+    sheetClosing = false;
+    dlg.classList.remove("closing");
+    const card1 = dlg.querySelector(".sheet-card");
+    if (card1) card1.style.transform = "";
   }
 }
 
@@ -537,7 +856,27 @@ function closeSheets() {
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) return dlg.close();
   sheetClosing = true;
   dlg.classList.add("closing");
-  dlg.addEventListener("animationend", () => dlg.close(), { once: true });
+  /* 判一次 sheetClosing 再 close:openSheet 可能在退场半路接管这次关闭
+     (掐掉动画重用这张卡)。不判的话,这个 once 监听会被之后随便哪个
+     冒泡上来的 animationend 触发,把好端端开着的卡片关掉。 */
+  dlg.addEventListener("animationend", () => { if (sheetClosing) dlg.close(); },
+    { once: true });
+}
+
+/* 通用确认卡,替掉原生 confirm() / prompt()。原生弹窗两个问题:
+   ① 风格与全应用的卡片语言割裂;② **系统弹窗里的人名圈名不受打码开关管**
+   —— 🕶 开着,confirm 里照样印真名。html 由调用方拼好(esc + blurable)。 */
+function confirmSheet(o) {
+  openSheet(`
+    <h3>${esc(o.title)}</h3>
+    ${o.html || ""}
+    <div class="btn-row">
+      <button class="btn ${o.danger ? "danger" : "primary"}" id="cfOk">${
+        esc(o.okLabel || "确认")}</button>
+      <button class="btn" id="cfNo">取消</button>
+    </div>`, o.title);
+  $("#cfOk").onclick = () => { if (o.onOk) o.onOk(); };
+  $("#cfNo").onclick = () => closeSheets();
 }
 
 function bindSheet() {
@@ -549,6 +888,11 @@ function bindSheet() {
     const c = dlg.querySelector(".sheet-card");
     if (c) c.style.transform = "";
     $("#sheetBody").innerHTML = "";
+    /* busy / toast 是 openSheet 搬进来的,物归原处(保持 toast 在前的
+       原始 DOM 序)。它们是 .sheet-card 的兄弟,上一行只清 #sheetBody,
+       伤不到它们 —— 别把它们挪进 #sheetBody,那样一关卡片就没了。 */
+    document.body.append($("#toast"), $("#busy"));
+    hidePeek();
     GraphView.focus(null);
   });
 
@@ -678,7 +1022,7 @@ async function bulkPreview() {
     B.preview = { create, update };
     busy(false);
     renderBulkForm();
-  } catch (e) { busy(false); toast(humanError(e, "比对失败")); }
+  } catch (e) { busy(false); toastError(e, "比对失败"); }
 }
 
 async function bulkSave() {
@@ -698,7 +1042,7 @@ async function bulkSave() {
     toast(`批量写入 ${res.relations} 条关系`);
   } catch (e) {
     busy(false);
-    toast(humanError(e, "批量写入失败"));
+    toastError(e, "批量写入失败");
   } finally { writing = false; }
 }
 
@@ -807,7 +1151,9 @@ function renderBulkForm() {
 
 /* ---------------- 人物卡片(四个分析折叠在这里) ---------------- */
 
-async function showPerson(pid) {
+/* seg:打开时直接落在哪一段("rel" / "ana" / "evt")。局势页的「找帮手」
+   用它深链到分析段 —— 不传就还是默认的关系段。 */
+async function showPerson(pid, seg) {
   GraphView.focus(pid);
   openSheet('<div class="dimtext">载入中…</div>');
 
@@ -819,6 +1165,8 @@ async function showPerson(pid) {
     ]);
   } catch (e) { openSheet(`<div class="warnbox">${esc(e.message)}</div>`); return; }
 
+  S.person = d;      // 删除确认卡要用他的关系数 / 事件数说明影响面
+  const seg0 = seg === "ana" || seg === "evt" ? seg : "rel";
   const p = d.person;
 
   const rels = d.relations.map(r => {
@@ -839,15 +1187,28 @@ async function showPerson(pid) {
   }).join("") || '<div class="dimtext">这个圈子里还没记录他的关系</div>';
 
   // ---- 敌人的敌人 ----(呈现规则见 allyRows)
-  const alliesHtml = allyRows((b.allies && b.allies.candidates || []).slice(0, 6));
+  const cands = (b.allies && b.allies.candidates || []).slice(0, 6);
+  const alliesHtml = allyRows(cands);
+  /* 折叠块的 summary 里直接带结论 —— 80% 的时候扫一眼 summary 就够了,
+     不用展开。没有压倒性人选时照实说(与 allyRows 的诚实呈现同一条原则)。 */
+  const allySum = !cands.length ? "没找到可拉拢的人"
+    : leadCount(cands, c => c.score) > 1 ? "没有压倒性人选"
+    : `首选 ${bn(cands[0].name)}`;
 
   // ---- 引荐路径 ----
-  const intro = b.intro && b.intro.path
+  const hasPath = !!(b.intro && b.intro.path);
+  const intro = hasPath
     ? `<div class="card"><div class="blurable">
          ${b.intro.path.map(s => esc(s.name)).join(" → ")}</div>
        <div class="hint">${b.intro.hops} 跳,优先走交情最铁的链路</div></div>`
     : `<div class="card"><div class="dimtext">${
-        esc((b.intro && b.intro.reason) || "还没设置「我是谁」,去设置页指定一下")}</div></div>`;
+        esc((b.intro && b.intro.reason) || "还没设置「我是谁」,去设置页指定一下")}</div>${
+        b.intro && b.intro.reason ? "" : `
+        <div class="btn-row"><button class="btn"
+          onclick="switchView('settings')">去设置页指定「我是谁」</button></div>`}</div>`;
+  const introSum = !hasPath ? "先设置「我是谁」"
+    : b.intro.hops <= 1 ? "你们直接认识"
+    : `${b.intro.hops} 跳,经 ${bn((b.intro.path[1] || {}).name || "—")}`;
 
   // ---- 派系 ----
   const fac = b.faction ? `<div class="card">
@@ -859,12 +1220,19 @@ async function showPerson(pid) {
     </div>` : "";
 
   // ---- 不稳定三角 ----
-  const tris = (b.triangles && b.triangles.triangles || []).slice(0, 4).map(t => `
+  const triList = (b.triangles && b.triangles.triangles || []);
+  const tris = triList.slice(0, 4).map(t => `
     <div class="card">
       <div class="blurable"><b>${t.members.map(m => esc(m.name)).join(" — ")}</b></div>
       <div class="meta dimtext">${esc(t.pattern)} · 撬动价值 ${t.leverage}</div>
       <div class="hint blurable">${esc(t.hint)}</div>
     </div>`).join("") || '<div class="dimtext">他周围没有不稳定的三角</div>';
+
+  // 派系 / 三角的 summary 结论
+  const facSum = b.faction
+    ? `${b.faction.size} 人${b.same_faction_as_me ? ",你也在里面" : ""}`
+    : "未归入派系";
+  const triSum = triList.length ? `${triList.length} 个` : "没有";
 
   openSheet(`
     <div class="head">
@@ -877,7 +1245,7 @@ async function showPerson(pid) {
       </div>
     </div>
     <div style="margin-bottom:10px">${d.circles.map(c =>
-      `<span class="tag">${esc(c.icon || "")} ${esc(c.name)}</span>`).join("")}</div>
+      `<span class="tag blurable">${esc(c.icon || "")} ${esc(c.name)}</span>`).join("")}</div>
 
     <!-- 分成三段。以前这些全叠在一个面板里,人物卡片长到两千多像素,
          想看事件要一路滚过关系、拉拢名单、引荐路径、派系、三角。
@@ -901,14 +1269,25 @@ async function showPerson(pid) {
       </div>
 
       <div data-seg="ana">
-        <div class="sec">可以拉拢谁对付他</div>
-        ${alliesHtml}
-
-        <div class="sec">我该托谁引荐</div>${intro}
-
-        ${fac ? '<div class="sec">他所在的派系</div>' + fac : ""}
-
-        <div class="sec">他周围的不稳定三角</div>${tris}
+        <!-- 四块分析改成折叠块,summary 里带结论 —— 以前平铺在一个滚动流里,
+             想看三角要滚过前三块。「可以拉拢谁」是这个应用的立身之本,默认展开;
+             其余收起,扫 summary 就能知道值不值得点开。 -->
+        <details class="fold" open>
+          <summary>可以拉拢谁对付他 · ${allySum}</summary>
+          ${alliesHtml}
+        </details>
+        <details class="fold">
+          <summary>我该托谁引荐 · ${introSum}</summary>
+          ${intro}
+        </details>
+        ${fac ? `<details class="fold">
+          <summary>他所在的派系 · ${facSum}</summary>
+          ${fac}
+        </details>` : ""}
+        <details class="fold">
+          <summary>他周围的不稳定三角 · ${triSum}</summary>
+          ${tris}
+        </details>
       </div>
 
       <div data-seg="evt">
@@ -924,6 +1303,18 @@ async function showPerson(pid) {
       <button class="btn" onclick="markMe(${pid})">设为「我」</button>
       <button class="btn danger" onclick="delPerson(${pid})">删除此人</button>
     </div>`);
+
+  // 深链:局势页「找帮手」带 seg="ana" 进来时,直接落在分析段
+  if (seg0 !== "rel") {
+    const sb = $("#sheetBody");
+    const segBody = sb.querySelector(".seg-body");
+    if (segBody) segBody.dataset.on = seg0;
+    sb.querySelectorAll(".seg-btn").forEach(x => {
+      const on = x.dataset.seg === seg0;
+      x.classList.toggle("on", on);
+      x.setAttribute("aria-selected", on ? "true" : "false");
+    });
+  }
 }
 
 /* ---------------- 连线卡片:两个人之间的故事 ---------------- */
@@ -1171,9 +1562,9 @@ async function createPersonInline(name, onPick) {
     S.graphLoaded = false;        // 图上多了个人 → 这次必须整张重排
     await refresh();
     busy(false);
-    toast(`已新建「${name}」`);
+    toast(`已新建「${bn(name)}」`, { html: true });
     onPick(r.id);
-  } catch (e) { busy(false); toast(humanError(e, "新建人物失败")); }
+  } catch (e) { busy(false); toastError(e, "新建人物失败"); }
   finally { writing = false; }
 }
 
@@ -1182,7 +1573,7 @@ async function createPersonInline(name, onPick) {
 function newPersonForm() {
   openSheet(`
     <h3>新建人物</h3>
-    <div class="sub">会加进「${esc(S.circle.name)}」。只有姓名是必填的。</div>
+    <div class="sub">会加进「${bn(S.circle.name)}」。只有姓名是必填的。</div>
     <label>姓名</label>
     <input class="input" id="npName" autocomplete="off" placeholder="张三">
     <label>部门</label>
@@ -1215,8 +1606,8 @@ async function savePerson() {
     closeSheets();
     await loadGraph();
     if (S.view === "people") renderPeople();
-    toast(`已加入「${S.circle.name}」`);
-  } catch (e) { busy(false); toast(humanError(e, "新建人物失败")); }
+    toast(`已加入「${bn(S.circle.name)}」`, { html: true });
+  } catch (e) { busy(false); toastError(e, "新建人物失败"); }
   finally { writing = false; }
 }
 
@@ -1433,7 +1824,9 @@ async function syncPairEdge(a, b) {
   // upsertEdge 返回 false = 有一端还不在图上。两种情况都只能整张重排。
   const patched = S.graphLoaded && GraphView.upsertEdge(a, b, agg);
   if (patched) {
-    S.patched = true;           // 复位键因此变成"按新关系重新排布"的出口
+    S.patched = true;
+    // 重排是显式的待办:图上浮出药丸,点了才整图重排(复位键不再变义)
+    $("#relayoutChip").classList.remove("hidden");
     paintLegend();
   } else {
     S.graphLoaded = false;
@@ -1467,9 +1860,10 @@ async function saveRelation() {
     busy(false);
     await refresh();
     if (!S.graphLoaded) await loadGraph();
-    toast(F.mode === "swap" ? `已换成「${F.kind}」` : "已记下");
+    if (F.mode === "swap") toast(`已换成「${bn(F.kind)}」`, { html: true });
+    else toast("已记下");
     showPair(F.a, F.b);
-  } catch (e) { busy(false); toast(humanError(e, "保存关系失败")); }
+  } catch (e) { busy(false); toastError(e, "保存关系失败"); }
   finally { writing = false; }
 }
 
@@ -1499,10 +1893,11 @@ async function delRelation(i) {
     busy(false);
     await refresh();
     if (!S.graphLoaded) await loadGraph();
-    // 撤销是照原样重建一条(id 会变,内容一模一样)
-    toastUndo(`已删除「${r.kind}」`, () => undoDelRelation(r, a, b));
+    // 撤销是照原样重建一条(id 会变,内容一模一样)。
+    // 关系类型本身就敏感(「情敌」),toastUndo 收 HTML,这里用 bn 打码
+    toastUndo(`已删除「${bn(r.kind)}」`, () => undoDelRelation(r, a, b));
     showPair(a, b);
-  } catch (e) { busy(false); toast(humanError(e, "删除失败")); }
+  } catch (e) { busy(false); toastError(e, "删除失败"); }
   finally { writing = false; }
 }
 
@@ -1521,7 +1916,7 @@ async function undoDelRelation(r, a, b) {
     if (!S.graphLoaded) await loadGraph();
     toast("已恢复");
     showPair(a, b);
-  } catch (e) { busy(false); toast(humanError(e, "撤销失败")); }
+  } catch (e) { busy(false); toastError(e, "撤销失败"); }
   finally { writing = false; }
 }
 
@@ -1546,7 +1941,7 @@ function renderEventForm() {
 
   openSheet(`
     <h3>记一笔</h3>
-    <div class="sub">记到「${esc(S.circle.name)}」。不经过 AI,只走本机。</div>
+    <div class="sub">记到「${bn(S.circle.name)}」。不经过 AI,只走本机。</div>
     <label>发生了什么</label>
     <textarea id="evtText" class="compact"
       placeholder="例:年会上他俩为了同一个项目当众吵了一架。">${esc(F.text)}</textarea>
@@ -1588,7 +1983,7 @@ async function saveEvent() {
     closeSheets();
     toast("记下了");
     // 事件不改变图的结构(不加人也不加边),所以这里**不重排、不重取图**
-  } catch (e) { busy(false); toast(humanError(e, "保存失败")); }
+  } catch (e) { busy(false); toastError(e, "保存失败"); }
   finally { writing = false; }
 }
 
@@ -1601,7 +1996,7 @@ function openAddMenu() {
       <div class="row" onclick="newPersonForm()">
         <svg class="ic" aria-hidden="true"><use href="#i-person"/></svg>
         <div class="main"><div class="nm">新建人物</div>
-          <div class="meta">加进「${esc(S.circle.name)}」</div></div>
+          <div class="meta">加进「${bn(S.circle.name)}」</div></div>
         <span class="dimtext">›</span>
       </div>
       <div class="row" onclick="openRelForm({})">
@@ -1627,14 +2022,34 @@ async function markMe(pid) {
   toast("已设为「我」");
 }
 
-async function delPerson(pid) {
-  if (!confirm("彻底删除这个人?他在所有圈子里的关系都会一起消失。")) return;
-  await api("/api/people/delete", { id: pid });
-  closeSheets();
-  S.graphLoaded = false;
-  await refresh();
-  loadGraph();
-  toast("已删除");
+/* 删人是全应用破坏力最大的操作(他在**所有圈子**的关系一起没,目前没有撤销),
+   确认卡要把影响面说出数来 —— S.person 是 showPerson 刚存的这个人的完整数据。 */
+function delPerson(pid) {
+  const p = personById(pid) || {};
+  const d = S.person && S.person.person && S.person.person.id === pid ? S.person : null;
+  const impact = d
+    ? `他在这个圈子里有 ${d.relations.length} 条关系、${d.events.length} 条相关事件;`
+    : "";
+  confirmSheet({
+    title: "删除这个人?",
+    html: `<div class="warnbox">${bn(p.name || "这个人")} 会被彻底删除:${impact}
+      他在<b>所有圈子</b>里的关系都会一起消失,而且现在还不能撤销。</div>`,
+    okLabel: "删除", danger: true,
+    onOk: guard(async () => {
+      if (writing) return;
+      writing = true;
+      busy(true, "删除中…");
+      try {
+        await api("/api/people/delete", { id: pid });
+        busy(false);
+        closeSheets();
+        S.graphLoaded = false;
+        await refresh();
+        loadGraph();
+        toast("已删除");
+      } finally { writing = false; busy(false); }
+    }, "删除失败"),
+  });
 }
 
 /* ---------------- 底部 AI 输入栏 ---------------- */
@@ -1644,14 +2059,19 @@ function bindAiBar() {
   ta.addEventListener("input", () => {
     ta.style.height = "auto";
     ta.style.height = Math.min(104, ta.scrollHeight) + "px";
+    paintSendState();
   });
+  paintSendState();
   $("#aiSend").onclick = sendIngest;
   // ＋ 挤在附件键左边,**送出键的位置一点不动** —— 那是肌肉记忆
   $("#aiPlus").onclick = openAddMenu;
   $("#aiAttach").onclick = () => $("#aiFile").click();
   $("#aiFile").onchange = guard(async e => {
     for (const f of e.target.files) {
-      if (f.size > 12 * 1024 * 1024) { toast(`${f.name} 超过 12MB,太大了`); continue; }
+      if (f.size > 12 * 1024 * 1024) {
+        toast(`「${bn(f.name)}」超过 12MB,太大了`, { html: true, force: true });
+        continue;
+      }
       const data = await new Promise(res => {
         const fr = new FileReader();
         fr.onload = () => res(String(fr.result).split(",")[1] || "");
@@ -1666,8 +2086,18 @@ function bindAiBar() {
   paintFiles();
 }
 
+/* 发送键在没有任何内容时禁用 —— 它是三颗相邻按钮里唯一有隐私后果的,
+   空点一下不该发出任何东西(以前会 toast 提示,但按钮看起来是可点的)。 */
+function paintSendState() {
+  const btn = $("#aiSend");
+  if (!btn) return;
+  const ta = $("#aiInput");
+  btn.disabled = !(ta && ta.value.trim()) && !S.files.length;
+}
+
 function paintFiles() {
   const box = $("#aiFiles");
+  paintSendState();
   if (!S.files.length) return box.classList.add("hidden");
   box.classList.remove("hidden");
   box.innerHTML = S.files.map((f, i) => `
@@ -1688,6 +2118,9 @@ async function sendIngest() {
   if (!S.state.llm_configured) {
     return showIngestUnconfigured();
   }
+  /* 第一次发送前把"内容会离开这台电脑"讲清楚(设置页的警告没人会翻到)。
+     确认过一次就记住,之后不再拦 —— 这是告知,不是每次都要跨的门槛。 */
+  if (!localStorage.getItem("aiSendOk")) return showFirstSendConfirm();
   busy(true, "AI 正在读…");
   try {
     const d = await api("/api/ingest", {
@@ -1697,8 +2130,27 @@ async function sendIngest() {
     showReview(d);
   } catch (e) {
     busy(false);
-    toast(e.message);
+    toastError(e);
   }
+}
+
+function showFirstSendConfirm() {
+  openSheet(`
+    <h3>发送前要知道的一件事</h3>
+    <div class="warnbox">用 AI 录入时,你输入的文字、上传的截图和文档,
+      <b>以及当前圈子里全部人的姓名和部门</b>(为了让模型认出已有的人),
+      都会发送给模型服务商(默认 OpenAI)。</div>
+    <div class="hint">不想外发就用 ＋ 里的手动录入 —— 那条路全程只走本机。
+      这个提示只出现这一次。</div>
+    <div class="btn-row">
+      <button class="btn primary" id="aiSendOk">知道了,发送</button>
+      <button class="btn" onclick="closeSheets()">先不发</button>
+    </div>`, "发送确认");
+  $("#aiSendOk").onclick = () => {
+    localStorage.setItem("aiSendOk", "1");
+    // 卡片留着不关:busy 会盖在它上面,抽取结果直接替换这张卡的内容
+    sendIngest();
+  };
 }
 
 function showIngestUnconfigured() {
@@ -1739,8 +2191,8 @@ function showReview(d) {
       </div>` : "";
     return `
     <div class="row" style="align-items:flex-start">
-      <input type="checkbox" class="pchk" data-i="${i}"
-             ${fuzzy || exact ? "" : "checked"} style="margin-top:3px">
+      <label class="chkwrap"><input type="checkbox" class="pchk" data-i="${i}"
+             ${fuzzy || exact ? "" : "checked"}></label>
       <div class="main">
         <div class="nm blurable">${esc(p.name)}
           ${fuzzy ? `<span class="tag warn">名字很像:${esc(p.matched_name)}</span>`
@@ -1772,8 +2224,8 @@ function showReview(d) {
     return `
     <div class="card revrel" data-i="${i}">
       <div class="hstack top">
-        <input type="checkbox" class="rchk" data-i="${i}"
-               ${weak ? "" : "checked"} style="margin-top:3px">
+        <label class="chkwrap"><input type="checkbox" class="rchk" data-i="${i}"
+               ${weak ? "" : "checked"}></label>
         <div class="grow">
           <div class="blurable"><b>${esc(r.a_name)}</b>
             <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
@@ -1801,7 +2253,7 @@ function showReview(d) {
     return `
     <div class="card revrel" data-i="${i}">
       <div class="hstack top">
-        <input type="checkbox" class="rchk" data-i="${i}" style="margin-top:3px">
+        <label class="chkwrap"><input type="checkbox" class="rchk" data-i="${i}"></label>
         <div class="grow">
           <div class="blurable"><b>${esc(r.a_name)}</b>
             <span class="dimtext">—</span> <b>${esc(r.b_name)}</b></div>
@@ -1824,9 +2276,10 @@ function showReview(d) {
   const gRows = guessed.map(i => derivedRow(d.relations[i], i)).join("");
 
   openSheet(`
+    <div id="reviewRoot">
     <h3>AI 读出来这些</h3>
     <div class="sub">用的是 ${esc(d.model)}。<b>每条都附了原文摘录</b>,
-      扫一眼就知道它有没有编。确认无误的才会入库到「${esc(S.circle.name)}」。</div>
+      扫一眼就知道它有没有编。确认无误的才会入库到「${bn(S.circle.name)}」。</div>
 
     <div class="sec">人物(${people.length})</div>
     <div class="list">${pRows || '<div class="dimtext">没有新人物</div>'}</div>
@@ -1842,11 +2295,18 @@ function showReview(d) {
     <div class="btn-row">
       <button class="btn primary" id="reviewOk">确认入库</button>
       <button class="btn" onclick="closeSheets()">放弃</button>
+    </div>
     </div>`);
 
   /* 类型选择器:点摘要才展开。用事件委托而不是给每行绑 —— 抽到十条时
-     那就是十份监听,而且展开后的 chip 是动态生成的,逐个绑还得重绑。 */
-  const relBody = $("#sheetBody");
+     那就是十份监听,而且展开后的 chip 是动态生成的,逐个绑还得重绑。
+
+     ⚠ 委托必须挂在 #reviewRoot(本次 openSheet 刚创建的包裹层)上,
+     **不能挂在 #sheetBody 上**:#sheetBody 是常驻元素,openSheet 只换它的
+     innerHTML,监听器会一次次累积 —— 第二次 AI 录入时两份监听互相抵消
+     (一份展开、一份看到已展开又收起),类型选择器点了没反应且不报错。
+     挂在包裹层上,下一次 innerHTML 替换就把监听连元素一起销毁了。 */
+  const relBody = $("#reviewRoot");
   relBody.addEventListener("click", ev => {
     const sum = ev.target.closest(".kindsum");
     if (sum) {
@@ -1950,7 +2410,7 @@ function showReview(d) {
       await refresh();
       loadGraph();
       toast(`入库:新建 ${res.people_created} 人 / ${res.relations} 条关系`);
-    } catch (e) { busy(false); toast(e.message); }
+    } catch (e) { busy(false); toastError(e); }
   };
 }
 
@@ -1960,12 +2420,12 @@ function showReview(d) {
    人物页本来就是这么干的,抽出来是因为局势页有四处要用(绕不开的人、
    跟我作对的人、派系名册、三角),而那串 setTimeout 拼在 onclick 里
    抄四遍迟早抄错一处 —— 而且只有点下去才看得出来。 */
-function gotoPerson(pid) {
+function gotoPerson(pid, seg) {
   switchView("graph");
   // 等一帧再定位:switchView 刚把 #view-graph 从 hidden 里放出来,
   // 这时候画布的 getBoundingClientRect 还是 0,centerOn 会算到屏幕外
   setTimeout(() => {
-    showPerson(pid);
+    showPerson(pid, seg);
     GraphView.centerOn(pid, bottomInset() + 240);
   }, 60);
 }
@@ -2134,7 +2594,11 @@ async function renderSituation() {
     if (S.view !== "situation" || sitKey() !== key) return;
     paintSituation(box, key, d);
   } catch (e) {
-    box.innerHTML = `<div class="warnbox">${esc(humanError(e, "算不出局势"))}</div>`;
+    box.innerHTML = `<div class="warnbox">${esc(humanError(e, "算不出局势"))}</div>
+      <div class="btn-row"><button class="btn" id="sitRetry">重试</button></div>`;
+    // 失败态必须有出口:以前只能切走再切回,而 dataset.key 的比对还可能拦住重算
+    const rb = $("#sitRetry");
+    if (rb) rb.onclick = () => { box.dataset.key = ""; renderSituation(); };
   } finally {
     sitBusy = false;
     // 请求在飞的时候换了圈子 → 现在把那一次补上(键没变就什么都不做,
@@ -2168,10 +2632,16 @@ function frontDetail(t) {
     占全圈敌意 ${t.share}%`;
 }
 
+/* 对子做成可点的按钮 —— 点开两人的连线卡看细节。以前是纯展示的 tag,
+   「谁和谁 -3」看得见点不动,想查细节还得自己去图上找这两个人。
+   外面必须包 hstack:.btn.mini::after 的 -4px 热区以「相邻间距 ≥8px」为
+   前提,直接 join 会让热区互相叠压 —— 点前一个对子的右缘会开错后一个。 */
 function frontPairs(pairs) {
-  return (pairs || []).slice(0, 4).map(p =>
-    `<span class="tag neg blurable">${esc(p.a_name)} ↔ ${esc(p.b_name)} ${p.w}</span>`
+  const btns = (pairs || []).slice(0, 4).map(p =>
+    `<button class="btn mini pairbtn" onclick="showPair(${p.a_id},${p.b_id})">` +
+    `<span class="blurable">${esc(p.a_name)} ↔ ${esc(p.b_name)}</span> ${p.w}</button>`
   ).join("");
+  return btns ? `<div class="hstack wrap">${btns}</div>` : "";
 }
 
 /* ---- ① 我的处境 ---- */
@@ -2206,6 +2676,8 @@ function meSection(d) {
              <div class="nm blurable">${esc(r.name)}</div>
              <div class="meta blurable">${esc(r.dept || "—")}</div>
            </div>${strengthTag(r.w)}
+           <button class="btn mini"
+             onclick="event.stopPropagation();gotoPerson(${r.id},'ana')">找帮手</button>
          </div>`).join("")}</div>`
     : '<div class="hint">目前没有人跟你直接结怨。</div>';
 
@@ -2356,9 +2828,7 @@ function factionSection(fs) {
 
 function renderSettings() {
   const st = S.state;
-  const meOpts = S.people.map(p =>
-    `<option value="${p.id}" ${st.me && st.me.id === p.id ? "selected" : ""}>${
-      esc(p.name)}</option>`).join("");
+  const me = st.me;
 
   $("#settingsBody").innerHTML = `
     <div class="sec">圈子</div>
@@ -2366,24 +2836,34 @@ function renderSettings() {
       <div class="row">
         <span class="glyph">${esc(c.icon || "🌐")}</span>
         <div class="main">
-          <div class="nm">${esc(c.name)}</div>
+          <div class="nm blurable">${esc(c.name)}</div>
           <div class="meta">${esc(c.kind)} · ${c.people} 人 · ${c.relations} 条关系</div>
         </div>
         <button class="btn mini"
-          onclick="renameCircle(${c.id})">改名</button>
+          onclick="openCircleForm(${c.id})">改名</button>
         <button class="btn danger mini"
           onclick="dropCircle(${c.id})">删</button>
       </div>`).join("")}
-    <div class="btn-row"><button class="btn" onclick="newCircle()">＋ 新建圈子</button></div>
+    <div class="btn-row"><button class="btn" onclick="openCircleForm()">＋ 新建圈子</button></div>
 
     <div class="sec">我是谁</div>
     <div class="card">
       <div class="hint" style="margin:0 0 8px">
         「可以拉拢谁」和「我该托谁引荐」都要以你为起点,必须先指定。</div>
-      <select id="meSel"><option value="">— 未设置 —</option>${meOpts}</select>
+      <!-- 不用原生下拉:iOS 上 100 个 option 是只能盲滚的滚轮,
+           而且打码开关管不到系统渲染的下拉列表(🕶 开着照样满屏真名)。
+           点行打开带搜索的选人卡,和录关系选人是同一套体验。 -->
+      <div class="row" id="meRow" onclick="openMePicker()">
+        ${me ? avatar(me.id, me.name, "sm") : '<span class="glyph dimtext">＋</span>'}
+        <div class="main">
+          <div class="nm blurable">${me ? esc(me.name) : "还没设置"}</div>
+          ${me ? "" : '<div class="meta">点这里选一个人</div>'}
+        </div>
+        <span class="dimtext">${me ? "更换 ›" : "›"}</span>
+      </div>
     </div>
 
-    <div class="sec">往「${esc(S.circle.name)}」里批量导入</div>
+    <div class="sec">往「${bn(S.circle.name)}」里批量导入</div>
     <div class="card">
       <label>人员名单(每行一人:姓名,部门,职位)</label>
       <textarea id="rosterText" class="compact"
@@ -2459,18 +2939,7 @@ function renderSettings() {
       这样连接口调用都不出这台机器。
     </div></div>`;
 
-  $("#facSw").onchange = e => {
-    S.byFaction = e.target.checked;
-    localStorage.setItem("byFaction", S.byFaction ? "1" : "");
-    GraphView.setFactionMode(S.byFaction);
-    paintLegend();
-  };
-
-  $("#meSel").onchange = guard(async e => {
-    if (!e.target.value) return;
-    await api("/api/people/me", { id: +e.target.value });
-    await refresh(); S.graphLoaded = false; toast("已设置");
-  }, "设置「我是谁」失败");
+  $("#facSw").onchange = e => setFactionColoring(e.target.checked);
 
   /* #rosterOut 这个容器一直存在,但从来没被填过 —— 按钮写着「预览并导入」,
      实际直接弹一个 confirm 报个数字,根本没有预览。现在真的先给出差异。 */
@@ -2486,25 +2955,44 @@ function renderSettings() {
       `<div class="card"><div class="hint">` +
       `将<b>新建 ${news.length} 人</b>、<b>更新 ${ups.length} 人</b>` +
       (dup.length ? `,跳过 ${dup.length} 行重复` : "") + `。<br>` +
-      (news.length ? `新建:${news.slice(0, 12).map(r => esc(r.name)).join("、")}` +
+      // 预览里全是真名,必须能被打码开关盖住
+      (news.length ? `新建:<span class="blurable">${
+          news.slice(0, 12).map(r => esc(r.name)).join("、")}</span>` +
         (news.length > 12 ? ` 等 ${news.length} 人` : "") + `<br>` : "") +
-      (ups.length ? `更新:${ups.slice(0, 12).map(r => esc(r.name)).join("、")}` +
+      (ups.length ? `更新:<span class="blurable">${
+          ups.slice(0, 12).map(r => esc(r.name)).join("、")}</span>` +
         (ups.length > 12 ? ` 等 ${ups.length} 人` : "") : "") +
       `</div>` +
       (dup.length ? `<div class="warnbox" style="margin-top:8px">` +
         dup.map(r => `第 ${r.line} 行:${esc(r.message)}` +
-          `<br><span class="mono dimtext">${esc(r.raw || "")}</span>`).join("<br>") +
+          `<br><span class="mono dimtext blurable">${esc(r.raw || "")}</span>`).join("<br>") +
         `</div>` : "") + `</div>`;
     const bad = dup;
     const n = news.length + ups.length;
     if (!n) return toast("没有可写入的行");
-    if (!confirm(`将写入 ${n} 人到「${S.circle.name}」,继续?`)) return;
-    const res = await api("/api/import/roster/commit",
-      { rows: d.rows, circle_id: S.circle.id });
-    // 只清成功的部分,解析失败的行留在框里等你改 —— 全清等于让人重打一遍
-    keepFailedLines("#rosterText", bad);
-    S.graphLoaded = false; await refresh(); renderSettings();
-    toast(`新建 ${res.created} 人,更新 ${res.updated} 人`);
+    /* 确认按钮就渲染在预览下面,**不再同步弹 confirm()** —— 同步弹窗会在
+       浏览器绘制预览之前跳出来,用户看到的只是一个报数字的系统框,
+       "先预览再写"这个设计在实际使用里等于不存在。 */
+    $("#rosterOut").insertAdjacentHTML("beforeend", `
+      <div class="btn-row">
+        <button class="btn primary" id="rosterCommit">确认写入 ${n} 人</button>
+        <button class="btn" id="rosterCancel">取消</button>
+      </div>`);
+    $("#rosterCancel").onclick = () => { $("#rosterOut").innerHTML = ""; };
+    $("#rosterCommit").onclick = guard(async () => {
+      busy(true, `写入 ${n} 人…`);
+      const res = await api("/api/import/roster/commit",
+        { rows: d.rows, circle_id: S.circle.id });
+      busy(false);
+      /* 只清成功的部分,解析失败的行留在框里等你改 —— 全清等于让人重打一遍。
+         ⚠ 必须放在 renderSettings() **之后**:它整块重写 #settingsBody,
+         先写回再重渲染等于白写(textarea 被换成了空的新元素)。 */
+      S.graphLoaded = false; await refresh(); renderSettings();
+      keepFailedLines("#rosterText", bad);
+      if (bad.length) $("#rosterOut").innerHTML =
+        `<div class="warnbox">有 ${bad.length} 行没写入,已留在上面的输入框里等你改。</div>`;
+      toast(`新建 ${res.created} 人,更新 ${res.updated} 人`);
+    }, "导入名单失败");
   }, "导入名单失败");
 
   $("#bulkGo").onclick = guard(async () => {
@@ -2519,13 +3007,27 @@ function renderSettings() {
         "</div>" : "";
     const good = d.rows.length - bad.length;
     if (!good) return toast("没有可写入的行");
-    if (!confirm(`将写入 ${good} 条关系到「${S.circle.name}」,继续?`)) return;
-    const res = await api("/api/import/relations/commit",
-      { rows: d.rows, auto_create: auto, circle_id: S.circle.id });
-    keepFailedLines("#bulkText", bad);
-    S.graphLoaded = false; await refresh(); renderSettings();
-    toast(`写入 ${res.relations} 条关系` +
-      (res.created_people ? `,新建 ${res.created_people} 人` : ""));
+    // 同 rosterGo:确认渲染在预览下面,不用同步 confirm() 把预览挡死
+    $("#bulkOut").insertAdjacentHTML("beforeend", `
+      <div class="hint">将写入 ${good} 条关系到「${bn(S.circle.name)}」。</div>
+      <div class="btn-row">
+        <button class="btn primary" id="bulkCommit">确认写入 ${good} 条</button>
+        <button class="btn" id="bulkCancel">取消</button>
+      </div>`);
+    $("#bulkCancel").onclick = () => { $("#bulkOut").innerHTML = ""; };
+    $("#bulkCommit").onclick = guard(async () => {
+      busy(true, `写入 ${good} 条…`);
+      const res = await api("/api/import/relations/commit",
+        { rows: d.rows, auto_create: auto, circle_id: S.circle.id });
+      busy(false);
+      // keepFailedLines 必须在 renderSettings 之后(理由见 rosterCommit)
+      S.graphLoaded = false; await refresh(); renderSettings();
+      keepFailedLines("#bulkText", bad);
+      if (bad.length) $("#bulkOut").innerHTML =
+        `<div class="warnbox">有 ${bad.length} 行没写入,已留在上面的输入框里等你改。</div>`;
+      toast(`写入 ${res.relations} 条关系` +
+        (res.created_people ? `,新建 ${res.created_people} 人` : ""));
+    }, "导入关系失败");
   }, "导入关系失败");
 
   $("#exportBtn").onclick = guard(async () => {
@@ -2539,43 +3041,99 @@ function renderSettings() {
     toast("已导出(电脑上也存了一份)");
   }, "导出失败");
   $("#importBtn").onclick = () => $("#importFile").click();
+  /* 以前选完文件**直接合并进库**,没有任何确认 —— 选错一个文件就把
+     别的备份灌进来了。先解析、报出文件里有什么、和当前库对一下量级,
+     用户点头才写。 */
   $("#importFile").onchange = guard(async e => {
     const f = e.target.files[0];
     if (!f) return;
+    e.target.value = "";                 // 允许下次选同一个文件再触发 onchange
+    let payload;
     try {
-      const payload = JSON.parse(await f.text());
-      const res = await api("/api/import", { payload, replace: false });
-      S.graphLoaded = false; await refresh(); renderSettings();
-      toast(`导入 ${res.people} 人 / ${res.relations} 条关系`);
-    } catch (err) { toast("导入失败:" + err.message); }
+      payload = JSON.parse(await f.text());
+    } catch (err) { return toast("这个文件不是合法的备份 JSON", { force: true }); }
+    const cnt = k => Array.isArray(payload[k]) ? payload[k].length : 0;
+    confirmSheet({
+      title: "导入这份备份?",
+      html: `<div class="hint">「${esc(f.name)}」里有:
+          ${cnt("circles")} 个圈子 / ${cnt("people")} 人 /
+          ${cnt("relations")} 条关系 / ${cnt("events")} 条事件。<br>
+          当前库里已有 ${S.state.counts.people} 人 /
+          ${S.state.counts.relations} 条关系。</div>
+        <div class="warnbox">导入是<b>合并</b>:同名的人算同一个,不会清空现有数据;
+          但合并进来的内容要撤销只能逐条删。</div>`,
+      okLabel: "合并导入",
+      onOk: guard(async () => {
+        busy(true, "导入中…");
+        const res = await api("/api/import", { payload, replace: false });
+        busy(false);
+        closeSheets();
+        S.graphLoaded = false; await refresh(); renderSettings();
+        toast(`导入 ${res.people} 人 / ${res.relations} 条关系`);
+      }, "导入失败"),
+    });
   }, "恢复备份失败");
   $("#seedBtn").onclick = loadSeed;
 }
 
-async function renameCircle(cid) {
-  const c = S.state.circles.find(x => x.id === cid);
-  const name = prompt("改成什么名字?", c.name);
-  if (!name || name === c.name) return;
-  await api("/api/circles", { id: cid, name });
-  await refresh(); paintCircleBtn(); renderSettings();
-  toast("已改名");
+/* 「我是谁」走通用选人卡(搜索 + updated_at 倒序,与录关系选人同一套) */
+function openMePicker() {
+  openPersonPicker("我是谁", guard(async pid => {
+    if (writing) return;          // 双击选人行不能发出并发写
+    writing = true;
+    busy(true, "写入中…");
+    try {
+      await api("/api/people/me", { id: pid });
+      await refresh();
+      S.graphLoaded = false;
+      busy(false);
+      closeSheets();
+      renderSettings();
+      toast("已设置");
+    } finally { writing = false; busy(false); }
+  }, "设置「我是谁」失败"));
 }
 
-async function dropCircle(cid) {
+function dropCircle(cid) {
   const c = S.state.circles.find(x => x.id === cid);
-  if (!confirm(`删除「${c.name}」?\n\n这个圈子里的 ${c.relations} 条关系会消失,` +
-               `但人不会被删(他们可能还在别的圈子里)。`)) return;
-  await api("/api/circles/delete", { id: cid });
-  await refresh();
-  S.circle = S.state.circles[0];
-  localStorage.setItem("circle", S.circle ? S.circle.id : "");
-  paintCircleBtn(); S.graphLoaded = false; renderSettings();
-  toast("已删除");
+  confirmSheet({
+    title: "删除这个圈子?",
+    html: `<div class="warnbox">${bn(c.name)} 里的 ${c.relations} 条关系会消失,
+      但<b>人不会被删</b>(他们可能还在别的圈子里)。</div>`,
+    okLabel: "删除", danger: true,
+    onOk: guard(async () => {
+      if (writing) return;
+      writing = true;
+      busy(true, "删除中…");
+      try {
+        await api("/api/circles/delete", { id: cid });
+        busy(false);
+        closeSheets();
+        await refresh();
+        S.circle = S.state.circles[0];
+        localStorage.setItem("circle", S.circle ? S.circle.id : "");
+        paintCircleBtn(); S.graphLoaded = false; renderSettings();
+        toast("已删除");
+      } finally { writing = false; busy(false); }
+    }, "删除圈子失败"),
+  });
 }
 
-async function loadSeed() {
-  if (S.state.counts.people > 0 &&
-      !confirm("库里已经有数据了。演示数据会合并进去(不会删除现有内容),继续?")) return;
+function loadSeed() {
+  if (S.state.counts.people > 0) {
+    confirmSheet({
+      title: "载入演示数据?",
+      html: `<div class="hint">库里已经有数据了。演示数据(虚构的公司圈 + 同学圈)
+        会<b>合并</b>进去,不会删除现有内容;之后不想要了得手动删。</div>`,
+      okLabel: "载入",
+      onOk: () => doLoadSeed(),
+    });
+    return;
+  }
+  doLoadSeed();
+}
+
+async function doLoadSeed() {
   busy(true, "载入中…");
   try {
     const res = await api("/api/seed", { replace: false });
@@ -2585,10 +3143,11 @@ async function loadSeed() {
     paintCircleBtn();
     S.graphLoaded = false;
     busy(false);
+    closeSheets();
     switchView("graph");
     loadGraph();
     toast(`已载入 ${res.circles} 个圈子 / ${res.people} 人`);
-  } catch (e) { busy(false); toast(e.message); }
+  } catch (e) { busy(false); toastError(e); }
 }
 
 /* Service Worker —— 让"添加到主屏幕"后能全屏离线打开外壳 */
@@ -2598,9 +3157,15 @@ if ("serviceWorker" in navigator) {
 }
 
 /* 同样是逃生路径:boot 挂了说明应用没起来,样式表未必可用,
-   所以这里的内联样式也是有意的。 */
+   所以这里的内联样式也是有意的(颜色选深浅底都能读的)。
+   e.message 常常是 "Failed to fetch" 这种用户看不懂的英文 —— 用现成的
+   humanError() 翻成人话;PWA 全屏没有地址栏,必须给一个重试按钮。 */
 boot().catch(e => {
   document.body.innerHTML =
-    `<div style="padding:30px;color:#e66767;font:15px system-ui">
-       启动失败:${esc(e.message)}</div>`;
+    `<div style="max-width:560px;margin:60px auto;padding:0 24px;` +
+    `font:15px/1.9 -apple-system,system-ui,sans-serif">` +
+    `<p style="color:#e66767;margin:0 0 18px">启动失败:${esc(humanError(e))}</p>` +
+    `<button onclick="location.reload()" style="min-height:44px;padding:10px 26px;` +
+    `font-size:16px;border:0;border-radius:10px;background:#6b78f0;color:#fff">` +
+    `重试</button></div>`;
 });

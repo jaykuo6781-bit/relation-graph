@@ -206,10 +206,53 @@ def _client():
     except ImportError:
         raise LLMError("缺少依赖,请在电脑上执行:pip install openai")
 
-    kwargs = {"api_key": config.LLM_API_KEY}
+    # 不传 timeout 的话,断网/被墙时请求会挂到底层 TCP 放弃为止(可能几分钟),
+    # 前端的 busy 遮罩全程转圈没有出口 —— 超时兜底必须在这里给
+    kwargs = {"api_key": config.LLM_API_KEY, "timeout": config.LLM_TIMEOUT}
     if config.LLM_BASE_URL:
         kwargs["base_url"] = config.LLM_BASE_URL
     return OpenAI(**kwargs)
+
+
+def _human_llm_error(e):
+    """把 SDK 抛出来的英文异常翻成能指导下一步动作的中文。
+
+    刻意不 import openai 的异常类做 isinstance —— openai 是可选依赖,
+    这个模块必须在没装它的机器上也能 import。按类名字符串和文案匹配就够了:
+    SDK 换版本、换供应商,最坏也只是落到兜底那条,不会崩。
+    """
+    name = type(e).__name__
+    text = str(e).lower()
+
+    # base_url 指到本机/内网时,"配代理"是错误指引(Ollama 没起来才是常因);
+    # 照做还可能把本地请求也导进代理,越修越坏。只看主机名,不在全串里
+    # 找子串 —— "10." 这种裸子串会误伤域名/端口。
+    host = ""
+    base = (config.LLM_BASE_URL or "").lower()
+    if "//" in base:
+        host = base.split("//", 1)[1].split("/", 1)[0].split(":", 1)[0]
+    local = (host in ("127.0.0.1", "localhost", "0.0.0.0")
+             or host.startswith("192.168.") or host.startswith("10."))
+    net_hint = (
+        f"当前 OPENAI_BASE_URL 指向本机/内网({config.LLM_BASE_URL}),"
+        "先确认那个模型服务(比如 Ollama)真的在运行。"
+        if local else
+        "如果你在国内网络,大概率是没配代理 —— 打开项目目录的 .env,"
+        "按 env.example 里「国内网络必看」那段配置 HTTPS_PROXY 后重启服务。")
+
+    if "Timeout" in name or "timed out" in text or "timeout" in text:
+        return "模型请求超时。" + net_hint
+    if "Connection" in name or "connection" in text:
+        return "连不上模型服务。" + net_hint
+    # 状态码只认锚定写法(openai SDK 的文案是 "Error code: 401 - ..."),
+    # 绝不在全文里找裸数字子串:"14293 tokens" 含 "429"、请求 id 里
+    # 也可能带 "401",裸匹配会把上下文超限/服务端故障误判成限流/坏 Key,
+    # 用户被引去查余额,真实原因反而看不到
+    if "Authentication" in name or "error code: 401" in text:
+        return "API Key 不对或已失效,请检查 .env 里的 OPENAI_API_KEY。"
+    if "RateLimit" in name or "error code: 429" in text:
+        return "模型服务限流或余额不足,稍等再试或检查账户余额。"
+    return f"模型调用失败:{e}"
 
 
 # ============================================================
@@ -278,7 +321,7 @@ def ingest(text="", files=None, circle_id=None):
             temperature=0.2,
         )
     except Exception as e:
-        raise LLMError(f"模型调用失败:{e}")
+        raise LLMError(_human_llm_error(e))
 
     content = resp.choices[0].message.content or "{}"
     try:

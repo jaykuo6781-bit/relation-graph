@@ -526,7 +526,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = fn(self, query, body)
             self._json(result if result is not None else {"ok": True})
-        except (ValueError, KeyError) as e:
+        except KeyError as e:
+            # str(KeyError) 是带引号的裸键名('a_id'),直接透出去像一句黑话。
+            # 键名本身就是缺的那个参数,包一层人话即可。
+            self._json({"error": f"缺少参数:{e.args[0]}"}, 400)
+        except ValueError as e:
+            # ValueError 大多是路由里主动 raise 的中文文案("内容不能为空"),
+            # 原样透出;别加前缀,加了反而把写好的句子弄拗口
             self._json({"error": str(e)}, 400)
         except Exception as e:
             traceback.print_exc()

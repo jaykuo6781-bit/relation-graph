@@ -184,7 +184,7 @@ button{font-family:inherit;color:inherit}
 }
 #circleBtn{
   display:flex;align-items:center;gap:8px;
-  background:transparent;border:0;padding:4px 6px;
+  background:transparent;border:0;padding:4px 6px;min-height:var(--tap);
   font-size:var(--fs-body);font-weight:var(--fw-med);letter-spacing:.2px;
   /* 50vw 而不是 58vw:顶栏右边要放下 3 个 40px 的按钮。
      375px 视口下 375-28(padding)=347,50vw=187,187+120=307,还剩 40px 余量。 */
@@ -195,14 +195,16 @@ button{font-family:inherit;color:inherit}
 #circleBtn .caret{color:var(--dim);font-size:var(--fs-micro);margin-left:-2px}
 
 .icon-btn{
-  /* 40×40 而不是 44:375px 视口上放不下 3×44 加圈子名。
-     40 已经远好于原来的 34×28(顶栏几个按钮挨在一起,手机上很容易点错)。 */
+  /* 视觉 40×40 而不是 44:375px 视口上放不下 3×44 加圈子名。
+     热区用负 inset 的伪元素补到 44(与 .filechip .x 同一个办法)——
+     视觉尺寸和热区尺寸本来就是两回事。 */
   display:inline-flex;align-items:center;justify-content:center;
   width:40px;height:40px;padding:0;line-height:1;
   background:transparent;border:1px solid transparent;
   border-radius:var(--r-md);font-size:var(--fs-form);
-  color:var(--dim);
+  color:var(--dim);position:relative;
 }
+.icon-btn::after{content:"";position:absolute;inset:-2px}
 .icon-btn:active{background:var(--bg-2)}
 .icon-btn.on{color:var(--accent);background:var(--bg-2)}
 
@@ -280,8 +282,13 @@ button{font-family:inherit;color:inherit}
 /* ---- 连线:流光带 ----
    stroke 由 JS 写成渐变 url(),两端淡出、中间实,线就有了光带的收束感。 */
 .edge{fill:none;stroke-linecap:round;transition:opacity .2s ease}
-/* 透明描边在默认的 visiblePainted 下不接收事件,必须显式声明 */
-.edge-hit{fill:none;stroke:transparent;stroke-width:26;
+/* 透明描边在默认的 visiblePainted 下不接收事件,必须显式声明。
+   宽度按缩放反向补偿成**恒定屏幕像素** —— 写死 26 画布单位时,
+   100 人复位缩放 0.259 下命中区只剩 6.7 屏幕像素,"点连线看关系"
+   这条路径实际不可用。机制与 .elabel 的字号补偿同一套,
+   --gscale 只在手势结束(settle)时写一次。 */
+.edge-hit{fill:none;stroke:transparent;
+  stroke-width:calc(28px / var(--gscale,1));
   pointer-events:stroke;cursor:pointer}
 .elabel{
   text-anchor:middle;fill:var(--text);pointer-events:none;
@@ -290,6 +297,20 @@ button{font-family:inherit;color:inherit}
   stroke-width:calc(4.5px / var(--gscale));stroke-linejoin:round;
   opacity:0;transition:opacity .2s ease;
 }
+/* 负向 / 混合边的关系文字**默认常显**:它们天然稀少,又是用户最想一眼
+   看到的信息(谁和谁是情敌、谁跟谁有利益冲突)—— 触屏没有 hover,
+   不常显的话手机上默认视图一条关系文字都没有。
+   正向边保持"聚焦才显",全量常显正是用户反感的"太多太乱"。
+   缩到最小档(lod-none)只留 .ekey(混合边 + 强度 ≤ -2 的深仇),
+   轻微嫌隙(-1)退场,防止 100 人时标签互相压字。 */
+.eg.neg .elabel,.eg.mix .elabel{opacity:.95}
+#svg.lod-none .eg.neg:not(.ekey) .elabel{opacity:0}
+/* 聚焦 / 悬停的点亮必须赢过上面这条压制:它是 (1,5,0)(:not 按参数计),
+   而通用点亮规则只有 (1,4,0)—— 不补这两条的话,lod-none 档聚焦某人时
+   他的正向边标签都浮出来了,唯独 -1 的负向边(恰恰是矛盾)不显示。
+   同为 (1,5,0),写在压制之后,后者胜。 */
+#svg.focused.lod-none .eg.near .elabel,
+#svg.hovering.lod-none .eg.lit .elabel{opacity:1}
 
 /* 混合关系:既有正向又有负向(私交很好但工作上是对手)。
    线本身是一头青一头红的渐变,这里只补一点点视觉权重 ——
@@ -334,6 +355,10 @@ button{font-family:inherit;color:inherit}
    或者就是"我")。 */
 #svg.lod-key .node:not(.key) .nm{display:none}
 #svg.lod-none .node .nm{display:none}
+/* lod-none 的地板:最重要的 8 个人 + 「我」(buildSVG 按 n.r 打的 .key2)
+   名字仍然显示 —— 100 人复位时不至于一个名字都没有,配合负向标签常显,
+   默认视图就能回答"主要矛盾在谁和谁之间"。 */
+#svg.lod-none .node.key2 .nm{display:inline}
 
 /* 这一条是把 LOD 做成层叠而不是 JS 循环的红利:
    **聚焦某人时,他和邻居的名字必显** —— 零额外代码,因为 .near / .sel 本来
@@ -420,6 +445,70 @@ button{font-family:inherit;color:inherit}
     var(--neg) 0 5px, transparent 5px 9px);
 }
 
+/* ---- 图上的浮动控件列(搜索 / ＋ / − / 派系着色) ----
+   右上角,避开左下的图例、底部的输入栏和顶栏正中的重排药丸。
+   44×44 = --tap 的热区下限;实底 bg-1(不用毛玻璃 —— backdrop-filter
+   是性能红线),与 #circleMenu 同一套视觉语言。 */
+#gctl{
+  position:absolute;top:12px;right:12px;z-index:6;
+  display:flex;flex-direction:column;gap:6px;
+  animation:floatin .16s ease-out;
+}
+.gctl-btn{
+  width:var(--tap);height:var(--tap);padding:0;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--bg-1);border:1px solid var(--line);
+  border-radius:var(--r-lg);color:var(--dim);
+  box-shadow:0 6px 18px rgba(0,0,0,.28);
+}
+.gctl-btn:active{background:var(--bg-2)}
+.gctl-btn.on{color:var(--accent);background:var(--bg-2)}
+
+/* ---- 重排药丸 ----
+   手动加关系后浮出来的"待办":点它才整图重排。定位不用 transform 居中
+   (入场动画要用 transform,两者会打架),用 left/right + margin:auto。 */
+#relayoutChip{
+  position:absolute;top:12px;left:0;right:0;margin:0 auto;z-index:6;
+  width:max-content;max-width:70vw;
+  min-height:var(--tap);padding:var(--sp-2) var(--sp-4);
+  background:var(--bg-1);border:1px solid var(--line);
+  border-radius:var(--r-pill);
+  color:var(--accent);font-size:var(--fs-small);font-weight:var(--fw-med);
+  box-shadow:0 6px 18px rgba(0,0,0,.28);
+  animation:floatin .16s ease-out;
+}
+#relayoutChip:active{background:var(--bg-2)}
+
+/* ---- 触屏「第一下点亮」的 peek 条 ----
+   与图例同锚点(输入栏上方);它出现时图例由 JS 淡出让位。
+   整条都是热区(再点一下开完整卡片)。 */
+#peek{
+  position:absolute;left:16px;right:16px;z-index:7;
+  bottom:calc(var(--aibar-h, 0px) + 14px);
+  display:flex;align-items:center;gap:10px;text-align:left;
+  min-height:var(--tap);padding:var(--sp-2) var(--sp-3);
+  background:var(--bg-1);border:1px solid var(--line);
+  border-radius:var(--r-lg);color:var(--text);
+  font-size:var(--fs-base);
+  box-shadow:0 10px 30px rgba(0,0,0,.4);
+  animation:floatin .16s ease-out;
+}
+#peek .dot{
+  width:14px;height:14px;border-radius:var(--r-full);flex:none;
+}
+#peek .pk-main{flex:1;min-width:0;line-height:var(--lh-tight)}
+#peek .pk-main b{font-weight:var(--fw-med)}
+#peek .pk-meta{
+  display:block;color:var(--dim);font-size:var(--fs-mini);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+#peek .pk-go{flex:none;color:var(--accent);font-size:var(--fs-small)}
+
+@keyframes floatin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){
+  #gctl,#relayoutChip,#peek{animation:none}
+}
+
 /* ---------------- 底部 AI 输入栏 ---------------- */
 
 #aibar{
@@ -430,7 +519,7 @@ button{font-family:inherit;color:inherit}
   display:flex;flex-direction:column;gap:2px;
   box-shadow:0 10px 34px rgba(0,0,0,.42);
 }
-.ai-row{display:flex;align-items:flex-end;gap:6px;padding-left:11px}
+.ai-row{display:flex;align-items:flex-end;gap:8px;padding-left:11px}
 #aiInput{
   flex:1;background:none;border:0;outline:none;color:var(--text);
   /* 必须 ≥16px:低于这个值 iOS Safari 会在聚焦时强制放大整页,
@@ -441,12 +530,15 @@ button{font-family:inherit;color:inherit}
   padding:7px 0;
 }
 #aiInput::placeholder{color:var(--dim)}
+/* 44×44 = 自己定的 --tap 下限。以前是 36×36 且三颗相邻 —— 它们的语义
+   完全不同(打开表单 / 打开相册 / **把内容发给模型服务商**),误触发送
+   是有隐私后果的。发送键再用一道 margin 与另外两颗拉开视觉距离。 */
 .ai-btn{
-  width:36px;height:36px;flex:none;border-radius:var(--r-md);
+  width:var(--tap);height:var(--tap);flex:none;border-radius:var(--r-md);
   border:0;background:var(--bg-3);color:var(--text-2);
   display:flex;align-items:center;justify-content:center;font-size:var(--fs-base);
 }
-.ai-btn.send{background:var(--accent);color:#fff}
+.ai-btn.send{background:var(--accent);color:#fff;margin-left:4px}
 .ai-btn:disabled{opacity:.4}
 #aiFiles{display:flex;flex-wrap:wrap;gap:6px;padding:5px 5px 3px}
 .filechip{
@@ -492,6 +584,11 @@ button{font-family:inherit;color:inherit}
   width:100%;max-width:none;height:100svh;max-height:100svh;
   background:transparent;box-shadow:none;overflow:hidden;
   display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
+  /* --kb 由 boot 里的 visualViewport 监听写入(键盘高度,事件驱动非逐帧):
+     软键盘弹出时把卡片顶上来,输入框不再被键盘压住。
+     点遮罩关闭判断的是 e.target === dlg,这块 padding 区域也会命中 dlg ——
+     但它恰好被键盘盖着,点不到,所以不影响。 */
+  padding-bottom:var(--kb, 0px);
 }
 /* ⚠ 这一条不能少。<dialog> 关闭时是靠浏览器默认样式表里的
    `dialog:not([open]){display:none}` 隐藏的,而上面那句 display:flex
@@ -543,9 +640,13 @@ button{font-family:inherit;color:inherit}
   background:var(--bg-3);border:0;color:var(--text-2);padding:0;
   display:flex;align-items:center;justify-content:center;
 }
+/* 视觉 32,热区补到 44 —— 关卡片是每张卡都要做的动作 */
+.sheet .close::after{content:"";position:absolute;inset:-6px}
 .sheet-body{
   flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;outline:none;
-  padding:0 var(--sp-5) calc(var(--sp-5) + var(--safe-b));
+  /* 底 padding 给足:iOS 上偶发"卡片最后一行被浏览器工具栏压着"的报告,
+     safe-b 在工具栏展开时可能是 0,所以再垫一个 12px 的下限。 */
+  padding:0 var(--sp-5) calc(var(--sp-6) + max(var(--safe-b), 12px));
   overscroll-behavior:contain;    /* 滚到底别把后面的页面一起带着滚 */
 }
 .sheet h3{margin:0 0 3px;font-size:var(--fs-title);font-weight:var(--fw-bold);letter-spacing:.2px}
@@ -609,6 +710,14 @@ button{font-family:inherit;color:inherit}
   border-radius:var(--r-lg);padding:10px 12px;
   display:flex;align-items:center;gap:11px;
 }
+/* 可点的行要有按压反馈。全局关了 tap-highlight 而 .row 一直没有 :active,
+   慢网下(点人要等两个接口)表现就是"点了没反应,再点一次"。
+   限定在真的可点的行上 —— 设置页的纯展示行不该跟着闪。 */
+.row[onclick]:active,.row[data-pid]:active,.row[data-pick]:active,
+.row[data-new]:active,label.row:active{
+  background:var(--bg-3);
+}
+.row[onclick],.row[data-pid],.row[data-pick],.row[data-new]{cursor:pointer}
 .row .main{flex:1;min-width:0}
 .row .nm{font-weight:var(--fw-med);font-size:var(--fs-base)}
 .row .meta{color:var(--dim);font-size:var(--fs-small);margin-top:2px;line-height:1.5}
@@ -638,19 +747,27 @@ label{display:block;color:var(--dim);font-size:var(--fs-small);margin:14px 0 6px
 .btn{
   background:var(--bg-3);border:1px solid var(--line);color:var(--text);
   border-radius:var(--r-md);padding:10px 15px;font-size:var(--fs-base);
+  min-height:var(--tap);
 }
 .btn.primary{background:var(--accent);border-color:var(--accent);
   color:#fff;font-weight:var(--fw-med)}
 .btn.danger{background:transparent;border-color:transparent;color:var(--neg-ink)}
-.btn:active{opacity:.72}
+.btn:active{opacity:.72;transform:scale(.98)}
 .btn:disabled{opacity:.45}
 .btn-row{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
 .btn-row .btn{flex:1;min-width:100px}
 input[type=range]{width:100%;accent-color:var(--accent)}
 input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent);flex:none}
-/* AI 审核是最核心的流程,却要求精准命中一个小方块。整行包成 <label>
-   之后点哪儿都能勾,这里把行本身的热区抬到 44。 */
+/* 批量记一笔和设置页的开关行:整行是 <label>,点哪儿都能勾 */
 label.hstack{min-height:var(--tap);cursor:pointer}
+/* AI 审核的勾选框不是 <label> 行(行里还有别的可点区:摘要按钮、radio),
+   不能整行包 label —— 用一个 44×44 的包裹层把勾选框自己的热区抬上去。
+   负 margin 抵消行内边距,视觉位置和裸 20px 时一致,不撑高行。 */
+.chkwrap{
+  width:var(--tap);height:var(--tap);flex:none;
+  display:flex;align-items:center;justify-content:center;
+  margin:-10px 0 -10px -10px;cursor:pointer;
+}
 
 .tag{
   display:inline-flex;align-items:center;gap:4px;
@@ -688,13 +805,14 @@ label.hstack{min-height:var(--tap);cursor:pointer}
 /* ---- 组件变体 ----
    这些都是重复出现过的模式,不是一次性的微调。 */
 
-/* 卡片里的行内小按钮:改名 / 删 / 删关系 */
-.btn.mini{padding:var(--sp-15) var(--sp-3);font-size:var(--fs-small)}
-
-/* AI 审核里的紧凑下拉 */
-.sel-compact{padding:var(--sp-15);font-size:var(--fs-base)}
-.sel-compact.kind{flex:1;min-width:110px}
-.sel-compact.str{width:132px}
+/* 卡片里的行内小按钮:改名 / 删 / 删关系。视觉保持紧凑(36px),
+   热区用负 inset 伪元素补到 ~44;相邻 chip 的间距是 8px,-4px 的热区
+   正好相接不重叠。 */
+.btn.mini{padding:var(--sp-15) var(--sp-3);font-size:var(--fs-small);
+  min-height:36px;position:relative}
+.btn.mini::after{content:"";position:absolute;inset:-4px}
+/* 「删」后果最重却常与「换类型」相邻 —— 拉开一点,给误触留缓冲 */
+.btn.mini.danger{margin-left:var(--sp-1)}
 
 /* 关系类别的标记符(♥ ¥ ▪ ● ✎ ⌂ ⚡),以及圈子自己的 emoji */
 .glyph{font-size:var(--fs-title);line-height:1}
@@ -733,6 +851,15 @@ label.hstack{min-height:var(--tap);cursor:pointer}
 .fold summary::after{content:"›";margin-left:auto;color:var(--dim)}
 .fold[open] summary{margin-bottom:var(--sp-2)}
 .fold[open] summary::after{content:"⌄"}
+/* 人物卡的分析段是四个连续的折叠块,块间要有呼吸 */
+.fold + .fold,.fold + .sec + .fold{margin-top:var(--sp-2)}
+.fold{display:block}
+/* summary 里的结论(「首选 张三」)—— 词是结论,颜色跟正文区分开 */
+.fold summary b{color:var(--text);font-weight:var(--fw-med)}
+
+/* 局势页里可点的「对子」按钮(点开两人的连线卡)。
+   继承 .btn.mini 的热区补偿,只换成负向的文字色。 */
+.btn.mini.pairbtn{color:var(--neg-ink)}
 
 /* 段落级留白由结构决定,不再逐处写 margin:0 —— 那是把同一件事
    重复写十几遍,而且总有漏的。 */
@@ -810,18 +937,41 @@ body.masked #svg .node .nm{stroke:var(--text)}
 body.masked #svg .node .ini{stroke:var(--node-ink)}
 body.masked #svg .elabel{stroke:var(--text)}
 
+/* 打码的三处漏网(逐处核对补上的):
+   ① 输入框里正在打的字 —— 聚焦中的那个保持可读(打码防的是"旁边有人
+      瞥见闲置的屏幕",不是防自己),失焦后藏起来;
+   ② 附件缩略图 —— 聊天截图的预览就是原图;
+   ③ 圈子名(#circleBtn / 菜单 / 设置页行)由 JS 侧加 blurable,走上面
+      已有的色带规则,这里不用新规则。 */
+body.masked .input:not(:focus),
+body.masked textarea:not(:focus){color:transparent}
+/* #aiInput 必须单独点名:它自己的规则带 ID,(1,0,0) 压过上面的 (0,2,2),
+   不点名的话全 app 最敏感的那个输入框(AI 草稿)恰好打不了码。 */
+body.masked #aiInput:not(:focus){color:transparent}
+body.masked .input:not(:focus)::placeholder,
+body.masked textarea:not(:focus)::placeholder{color:transparent}
+body.masked .filechip img{visibility:hidden}
+
 /* UA 默认给 dialog 的 margin/border/padding 要清掉。
    不设 ::backdrop —— 非模态 dialog 本来就没有。 */
 #toast{
   position:fixed;left:50%;bottom:calc(104px + var(--safe-b));right:auto;top:auto;
   transform:translateX(-50%);margin:0;border:0;
   background:var(--text);color:var(--bg-0);font-weight:var(--fw-med);
-  padding:9px 17px;border-radius:var(--r-md);font-size:var(--fs-small);
+  /* 12px 上下:整条 toast 是「撤销」的热区,得够得着 */
+  padding:12px 17px;border-radius:var(--r-md);font-size:var(--fs-small);
   box-shadow:0 10px 30px rgba(0,0,0,.45);max-width:86vw;width:max-content;
   text-align:center;
 }
+/* 入场用一点 opacity 动效,与卡片的 rise 对称;不动 transform ——
+   定位就靠 translateX(-50%),动画一碰 transform 位置就飞了 */
+#toast[open]{animation:fadein .15s ease-out}
 #toast:not([open]){display:none}
 #toast b{text-decoration:underline;text-underline-offset:2px}
+/* 下划线是 toast 里「这里可点(撤销)」的唯一线索。bn() 打码用的
+   <b class="blurable"> 不能长得和它一样 —— 否则「已删除「情敌」 · 撤销」
+   里两个词都带下划线,可操作的那个不再一眼可辨。 */
+#toast b.blurable{text-decoration:none}
 #busy{
   position:fixed;inset:0;z-index:90;display:flex;
   align-items:center;justify-content:center;

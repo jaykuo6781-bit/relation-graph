@@ -612,6 +612,98 @@ def main():
     check("材料里有图片时一律放行(出处来自读图,本就不在文本里)",
           _llm.evidence_in_source("图上读到的话", SRC, has_images=True))
 
+    print("\n模型异常要翻成人话(SDK 的英文别原样透给用户)")
+    # 伪造异常类是刻意的:openai 是可选依赖,selftest 不能假设装了它;
+    # 而 _human_llm_error 本来就按类名字符串匹配,伪造类走的就是真实路径
+
+    class APITimeoutError(Exception):
+        pass
+
+    class AuthenticationError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    check("超时 → 中文 + 指向 .env 的代理配置",
+          "代理" in _llm._human_llm_error(APITimeoutError("Request timed out.")),
+          _llm._human_llm_error(APITimeoutError("Request timed out.")))
+    check("连接失败(只有文案没有类名)也能识别 → 代理提示",
+          "代理" in _llm._human_llm_error(Exception("Connection error.")),
+          _llm._human_llm_error(Exception("Connection error.")))
+    check("鉴权失败 → 指向 OPENAI_API_KEY",
+          "OPENAI_API_KEY" in _llm._human_llm_error(
+              AuthenticationError("Error code: 401 - invalid api key")))
+    check("限流 → 提示稍等/查余额",
+          "限流" in _llm._human_llm_error(RateLimitError("Error code: 429")))
+    check("认不出的异常保留原文兜底",
+          _llm._human_llm_error(Exception("boom"))
+          == "模型调用失败:boom")
+    # 状态码必须锚定匹配("error code: 401"),不能在全文里找裸数字:
+    # 上下文超限的 400 文案 "...14293 tokens..." 含 "429",裸匹配会把它
+    # 误判成"限流/查余额",用户看不到真实原因;请求 id 里带 "401" 同理
+    check("「14293 tokens」不能被误判成限流",
+          "限流" not in _llm._human_llm_error(
+              Exception("Error code: 400 - your messages resulted in 14293 tokens")),
+          _llm._human_llm_error(
+              Exception("Error code: 400 - your messages resulted in 14293 tokens")))
+    check("请求 id 里的 401 不能被误判成坏 Key",
+          "OPENAI_API_KEY" not in _llm._human_llm_error(
+              Exception("Internal server error (req_ab401cd)")))
+
+    print("\ntimeout 与异常翻译真的接上了线(不只是函数自己对)")
+    # ① _client() 必须把 config.LLM_TIMEOUT 传给 OpenAI 构造器 ——
+    #    删掉那个键的话,断网时请求挂几分钟,busy 遮罩没有出口。
+    #    塞一个假 openai 模块进 sys.modules,不需要真装 openai。
+    import sys
+    import types
+
+    import config as _cfg
+    captured = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    fake_mod = types.ModuleType("openai")
+    fake_mod.OpenAI = _FakeOpenAI
+    old_mod = sys.modules.get("openai")
+    old_key = _cfg.LLM_API_KEY
+    sys.modules["openai"] = fake_mod
+    _cfg.LLM_API_KEY = "sk-test"
+    try:
+        _llm._client()
+        check("_client() 把 timeout 传给了 OpenAI 构造器",
+              captured.get("timeout") == _cfg.LLM_TIMEOUT, str(captured))
+        # ② ingest 的调用失败必须经 _human_llm_error 翻译后再抛 ——
+        #    退回 f"模型调用失败:{e}" 的旧写法时,翻译函数就成了死代码
+        class _TimeoutBoom(Exception):
+            pass
+
+        class _FakeClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kw):
+                        raise _TimeoutBoom("Request timed out.")
+
+        old_client = _llm._client
+        _llm._client = lambda: _FakeClient()
+        try:
+            _llm.ingest(text="张三和李四闹翻了", circle_id=cid)
+            check("ingest 在模型调用失败时应当抛 LLMError", False)
+        except _llm.LLMError as e:
+            check("ingest 的报错经过了 _human_llm_error(含网络指引)",
+                  "超时" in str(e), str(e))
+        finally:
+            _llm._client = old_client
+    finally:
+        if old_mod is None:
+            sys.modules.pop("openai", None)
+        else:
+            sys.modules["openai"] = old_mod
+        _cfg.LLM_API_KEY = old_key
+
     print("\n传递推导(代码算,不交给模型)")
     rc = db.create_circle("_推导测试", "自定义")
     for nm in ("甲宿", "乙宿", "丙宿"):
