@@ -1956,6 +1956,17 @@ console.log("\n群体说法展开(v10):AI 按关系网展开「我所有朋友�
   check("主抽取漏标时有专注重试(单任务小调用),失败落回确定性提示",
         /_retry_group_claims/.test(py) && /pending_hints/.test(py) &&
         /except Exception:\s*\n\s*retry = None/.test(py));
+
+  /* v13:真机第四抓 —— 伪人名(建出叫「Alex的室友」的节点)、展开被
+     "把握不足"整段不勾、证据张冠李戴。 */
+  check("伪人名清洗:「我」还原真名、「X的室友」整行转 claim",
+        /_pseudo_group_name/.test(py) && /pre_claims/.test(py) &&
+        /a_name = me\["name"\]/.test(py));
+  check("展开行置信地板 0.8(不继承重试模型的低置信)",
+        /max\(conf, 0\.8\)/.test(py));
+  check("证据错配守卫在,前端理由上屏",
+        /evidence_mismatch/.test(py) && /是我的朋友" in ne/.test(py) &&
+        /evidence_mismatch === true/.test(ajs) && /张冠李戴/.test(ajs));
 }
 
 console.log("\n" + "=".repeat(52));

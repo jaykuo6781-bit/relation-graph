@@ -2236,8 +2236,12 @@ function showReview(d) {
        它是"原文明说的更新",和展开出来的批量覆盖不是一回事。 */
     const ghost = r.expand_ghost === true;
     const dup = !!r.expanded_from && r.existing_strength != null;
-    const noCheck = weak || ghost || dup;
-    const why = ghost ? "展开出的名单里有原文和库里都找不到的人,可能是模型编的"
+    // mism:出处说的是「我」的关系(「Joan也是我的朋友」),行的两端却都
+    // 不是我 —— 后端标的张冠李戴守卫
+    const mism = r.evidence_mismatch === true;
+    const noCheck = weak || ghost || dup || mism;
+    const why = mism ? "出处说的是「我」的关系,跟这两个人对不上,可能是模型张冠李戴"
+      : ghost ? "展开出的名单里有原文和库里都找不到的人,可能是模型编的"
       : dup ? (r.existing_strength === r.strength
           ? "这条库里已经有了,不勾就保持原样"
           : `这条库里已有(${fs(r.existing_strength)}),勾了入库会改成 ${fs(r.strength)}`)

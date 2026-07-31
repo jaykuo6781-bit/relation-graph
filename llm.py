@@ -54,6 +54,23 @@ GROUP_HINT_PATTERNS = (
 )
 
 
+def _pseudo_group_name(name):
+    """「Alex的室友」这类被模型当成**人名**输出的群体短语。
+
+    真机抓到过:模型在 relations 里给出 b=「Alex的室友」,确认入库会真的
+    建出一个叫这个的节点。是群体短语 → 返回剥好尾巴的短语(交给 claim
+    解析器展开),不是 → None。
+    """
+    npz = _norm_quote(name)
+    for suf in ("都认识", "都熟", "都见过", "都", "们"):
+        if npz.endswith(suf):
+            npz = npz[: -len(suf)]
+    for kw in ("的室友", "的同学", "的朋友"):
+        if npz.endswith(kw) and len(npz) > len(kw):
+            return npz
+    return None
+
+
 def _unhandled_group_hints(norm_src, claims, relation_rows, notices):
     """确定性兜底:原文像群体说法、但模型两头都空着的模式。返回命中子串。
 
@@ -171,6 +188,9 @@ def _system_prompt(roster, relations_block=None):
 target:「我」的真名, kind:「点头之交」}。
 「X也是我的朋友」这句话本身就是一条关系(我—X:朋友),必须照常在
 relations 里输出,别因为它挨着群体说法就漏掉。
+一条 evidence 只支撑它**明说的那两个人**:「Joan也是我的朋友」只支撑
+Joan—我,不支撑 Joan 和别人。「X的室友」不是人名,绝不能出现在 relations
+的 a/b 里 —— 那是群体短语,只能进 group_claims。
 两条边界(容易搞错,请逐字执行):
 - 只有**点名一群人**的说法(我所有朋友、我们部门的人、大家)才进 group_claims;
   「她和某乙比较亲近」这种**两个人之间**的关系,**绝不进 group_claims**,
@@ -656,6 +676,12 @@ def _align(raw, source_text, circle_id, n_images=0):
         name = (p.get("name") or "").strip()
         if not name:
             continue
+        # 伪人名过滤:「我」「她」和「Alex的室友」都不是可以建档的人 ——
+        # 放进去会在人物段生成一个真的会入库的伪节点
+        if _norm_quote(name) in ("我", "她", "他", "我自己"):
+            continue
+        if _pseudo_group_name(name):
+            continue
         matched, how = _match_person(name, all_people)
         person_rows.append({
             "name": name,
@@ -676,14 +702,54 @@ def _align(raw, source_text, circle_id, n_images=0):
     for er in db.list_relations(circle_id):
         existing[(er["a_id"], er["b_id"], er["kind"])] = er["strength"]
 
+    # 「我」的信息在行级清洗就要用(端点名「我」要还原成真名),提前取
+    me = db.get_me()
+    circle_people = db.list_people(circle_id)
+    me_in = bool(me) and any(p["id"] == me["id"] for p in circle_people)
+
     norm_src = _norm_quote(source_text)
     relation_rows = []
+    pre_claims = []     # 模型把「X的室友」当人名输出时,整行转成 claim 从这走
     seen_pairs = set()      # 同一批里的镜像重复(a、b 调换再来一遍)只留第一条
     for r in raw.get("relations", []):
         a_name = (r.get("a") or "").strip()
         b_name = (r.get("b") or "").strip()
         kind = db.normalize_kind(r.get("kind", ""))
         if not a_name or not b_name or kind not in db.RELATION_KINDS:
+            continue
+        info = db.RELATION_KINDS[kind]
+        try:
+            strength = int(r.get("strength", info["default"]))
+        except (TypeError, ValueError):
+            strength = info["default"]
+        strength = max(-3, min(3, strength))
+
+        # ---- 伪人名清洗(真机抓到过:确认入库会建出叫「我」和「Alex的室友」
+        # 的节点)----
+        # ① 端点名是「我」→ 还原成真名;没标「我」就只能丢这行
+        if _norm_quote(a_name) in ("我", "我自己"):
+            if not me_in:
+                continue
+            a_name = me["name"]
+        if _norm_quote(b_name) in ("我", "我自己"):
+            if not me_in:
+                continue
+            b_name = me["name"]
+        # ② 端点名是「X的室友」这类群体短语 → 它不是人,是没被标成 claim 的
+        # 群体说法:整行转成 claim,交给同一套确定性解析器展开
+        ga = _pseudo_group_name(a_name)
+        gb = _pseudo_group_name(b_name)
+        if ga and gb:
+            continue
+        if ga or gb:
+            pre_claims.append({
+                "phrase": ga or gb,
+                "group": "其他",
+                "target": b_name if ga else a_name,
+                "kind": kind, "strength": strength,
+                "evidence": r.get("evidence", ""),
+                "confidence": r.get("confidence", 0.7),
+            })
             continue
         if a_name == b_name:
             continue
@@ -698,12 +764,6 @@ def _align(raw, source_text, circle_id, n_images=0):
 
         pa, how_a = _match_person(a_name, all_people)
         pb, how_b = _match_person(b_name, all_people)
-        info = db.RELATION_KINDS[kind]
-        try:
-            strength = int(r.get("strength", info["default"]))
-        except (TypeError, ValueError):
-            strength = info["default"]
-        strength = max(-3, min(3, strength))
 
         expanded_from = (r.get("expanded_from") or "").strip()
         row = {
@@ -746,6 +806,17 @@ def _align(raw, source_text, circle_id, n_images=0):
             if (na, nb, kind) in existing:
                 row["existing_strength"] = existing[(na, nb, kind)]
 
+        # 证据错配守卫(窄模式):出处说「…是我的朋友/死党」,行的两端却都
+        # 不是「我」—— 真机抓到过 Joan—Alex 挂着「Joan也是我的朋友」的出处,
+        # substring 校验挡不住这种张冠李戴。默认不勾,理由上屏。
+        if me_in and not expanded_from:
+            ne = _norm_quote(r.get("evidence", ""))
+            if ("是我的朋友" in ne or "是我的死党" in ne):
+                nm_me = _norm_quote(me["name"])
+                if _norm_quote(a_name) != nm_me and _norm_quote(b_name) != nm_me:
+                    row["evidence_mismatch"] = True
+                    row["accepted"] = False
+
         relation_rows.append(row)
 
     # ---- 群体说法展开:模型标记(group_claims),代码枚举名单 ----
@@ -755,9 +826,7 @@ def _align(raw, source_text, circle_id, n_images=0):
     # 加强后仍会漏掉死党、把"我的朋友"当成"我"、同一对正反输出两遍。
     # 枚举是查表活,代码做:一个不漏、绝不圈错、天然去重。
     extra_notices = []
-    me = db.get_me()
-    circle_people = db.list_people(circle_id)
-    me_in = bool(me) and any(p["id"] == me["id"] for p in circle_people)
+    # me / circle_people / me_in 已在行级清洗前取好(见上)
     name_of = {p["id"]: p["name"] for p in circle_people}
 
     # 展开去噪的依据(真机用户抓到过"朋友+2 与 点头之交 0 并存"的自相矛盾):
@@ -866,6 +935,12 @@ def _align(raw, source_text, circle_id, n_images=0):
                             elif er["b_id"] == aid:
                                 members.add(er["a_id"])
                     break
+                if members is not None and not force_me_target:
+                    # claim 的 phrase 没带「我和」,但**原文**是「我和X的室友
+                    # 都认识」的形态 → 对象只能是「我」。真机抓到过:模型把
+                    # target 填成句子里别的人(Joan),Alex 的室友全连错了对象。
+                    if ("我和" + npz) in norm_src or ("我跟" + npz) in norm_src:
+                        force_me_target = True
                 if members is not None and force_me_target:
                     target_name = me["name"]
                 if members is None:
@@ -918,7 +993,12 @@ def _align(raw, source_text, circle_id, n_images=0):
                     "evidence": evidence,
                     "evidence_ok": evidence_in_source(
                         evidence, source_text, n_images > 0),
-                    "confidence": conf,
+                    # 置信地板 0.8:成员是代码按关系网查表的、evidence 是
+                    # 过了校验的原句 —— 不该继承(重试)模型的低置信,否则
+                    # 展开行会被前端"把握不足"规则整段默认不勾(真机用户
+                    # 把这读成了"没判断上")。解释性风险由段头文案 + 逐条
+                    # 勾选承担;幽灵/重复的不勾规则不走 confidence,不受影响。
+                    "confidence": max(conf, 0.8),
                     "accepted": True,
                     "expanded_from": phrase,
                 }
@@ -931,7 +1011,8 @@ def _align(raw, source_text, circle_id, n_images=0):
                         row["existing_strength"] = existing[(na, nb, kind)]
                 relation_rows.append(row)
 
-    _process_claims(raw.get("group_claims") or [])
+    # pre_claims:模型误当人名的「X的室友」在行级清洗时转来的,走同一套解析
+    _process_claims((raw.get("group_claims") or []) + pre_claims)
 
     # 专注重试:主调用没标出群体说法、而确定性检测发现了模式时,发起
     # 第二次**只做标记这一件事**的小调用 —— 整句多任务负载下 4o-mini

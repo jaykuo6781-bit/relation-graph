@@ -1142,6 +1142,65 @@ def main():
             "她认识我的所有朋友", gc, 0)
         check("重试也失败时,确定性提示兜底仍在",
               any("没能自动展开" in n for n in out14["notices"]))
+
+        # ---- v13:伪人名清洗 / 置信地板 / 证据错配守卫 ----
+        ev13 = "Joan也是我的朋友"
+        out15 = _llm._align(
+            {"persons": [{"name": "我", "dept": "", "title": ""},
+                         {"name": "友测乙的室友", "dept": "", "title": ""},
+                         {"name": "Joan", "dept": "", "title": ""}],
+             "relations": [
+                 {"a": "Joan", "b": "我", "kind": "朋友", "strength": 2,
+                  "evidence": ev13, "confidence": 0.9, "expanded_from": ""},
+                 {"a": "我测甲", "b": "Joan", "kind": "朋友", "strength": 2,
+                  "evidence": ev13, "confidence": 0.9, "expanded_from": ""},
+                 {"a": "Joan", "b": "友测丙", "kind": "朋友", "strength": 2,
+                  "evidence": ev13, "confidence": 0.9, "expanded_from": ""},
+                 {"a": "我", "b": "友测乙的室友", "kind": "点头之交",
+                  "strength": 0, "evidence": "我和友测乙的室友都认识",
+                  "confidence": 0.5, "expanded_from": ""},
+             ],
+             "group_claims": [], "notices": []},
+            "我和友测乙的室友都认识,Joan也是我的朋友", gc, 0)
+        names15 = [(r["a_name"], r["b_name"]) for r in out15["relations"]]
+        check("端点「我」被还原成真名,且与另一条 me—Joan 去重成一条",
+              sum(1 for a, b in names15
+                  if {a, b} == {"我测甲", "Joan"}) == 1, str(names15))
+        check("没有任何行/人物残留「我」或「X的室友」这种伪名",
+              not any("的室友" in a or "的室友" in b or "我" in (a, b)
+                      for a, b in names15)
+              and all(p["name"] == "Joan" for p in out15["persons"]),
+              str(names15) + str([p["name"] for p in out15["persons"]]))
+        e15 = [r for r in out15["relations"] if r.get("expanded_from")]
+        check("「我—友测乙的室友」整行转成 claim 并确定性展开(室友戊×我)",
+              any(r["a_name"] == "室友戊" and r["b_name"] == "我测甲"
+                  for r in e15), str(e15))
+        check("展开行置信地板 0.8(claim 只有 0.5 也不再被『把握不足』误伤)",
+              all(r["confidence"] >= 0.8 for r in e15), str(e15))
+        m15 = [r for r in out15["relations"]
+               if {r["a_name"], r["b_name"]} == {"Joan", "友测丙"}][0]
+        check("★ 错配守卫:「Joan也是我的朋友」安到 Joan—友测丙 头上 → 不勾",
+              m15.get("evidence_mismatch") is True
+              and m15["accepted"] is False, str(m15))
+        ok15 = [r for r in out15["relations"]
+                if {r["a_name"], r["b_name"]} == {"我测甲", "Joan"}][0]
+        check("错配守卫不误伤:me 在任一端就不触发",
+              "evidence_mismatch" not in ok15 and ok15["accepted"] is True)
+        # phrase 没带「我和」、但原文是「我和X的室友…」形态 → target 只能是我,
+        # 模型填的 Joan 被覆盖(真机抓到过 Alex 室友被连到 Joan 头上)
+        out16 = _llm._align(
+            {"persons": [], "relations": [],
+             "group_claims": [{"phrase": "友测乙的室友", "group": "其他",
+                               "target": "Joan", "kind": "点头之交",
+                               "strength": 0, "evidence": "我和友测乙的室友都认识",
+                               "confidence": 0.9}],
+             "notices": []},
+            "我和友测乙的室友都认识,Joan也是我的朋友", gc, 0)
+        e16 = [r for r in out16["relations"] if r.get("expanded_from")]
+        check("★ 原文「我和X的室友」形态 → 覆盖模型的错 target,连到「我」",
+              any(r["b_name"] == "我测甲" for r in e16)
+              and not any("Joan" in (r["a_name"], r["b_name"]) for r in e16),
+              str(e16))
     finally:
         db.set_me(prev_me["id"])
         _llm._retry_group_claims = prev_retry
